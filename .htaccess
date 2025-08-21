@@ -1,0 +1,10 @@
+RewriteEngine Off
+Options -MultiViews
+PassengerEnabled on
+PassengerAppRoot PASSENGER_APP_ROOT_PLACEHOLDER
+PassengerAppType wsgi
+PassengerStartupFile passenger_wsgi.py
+PassengerBaseURI /
+PassengerPython PASSENGER_PYTHON_PATH_PLACEHOLDER
+ErrorDocument 404 "Not Found"
+ErrorDocument 500 "Server Error"

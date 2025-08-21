@@ -1,0 +1,34 @@
+name: Deploy to Production
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH and deploy
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.HOST }} >> ~/.ssh/known_hosts
+
+          # Copy everything except git, github, and pycache
+          rsync -avz --exclude='.git/' --exclude='.github/' --exclude='__pycache__/' --exclude='*.pyc' ./ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:${{ secrets.DEPLOY_PATH }}/
+
+      - name: Configure .htaccess and restart
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd ${{ secrets.DEPLOY_PATH }}
+            sed -i 's|PASSENGER_APP_ROOT_PLACEHOLDER|${{ secrets.PASSENGER_APP_ROOT }}|g' .htaccess
+            sed -i 's|PASSENGER_PYTHON_PATH_PLACEHOLDER|${{ secrets.PASSENGER_PYTHON_PATH }}|g' .htaccess
+            touch tmp/restart.txt
