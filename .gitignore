@@ -1,1 +1,8 @@
+# Local SQLite DB
+xlsvc.db
+
+# macOS
+.DS_Store
+
+uploads/
 venv/

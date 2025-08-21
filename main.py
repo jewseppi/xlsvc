@@ -8,6 +8,10 @@ import pandas as pd
 import os
 from datetime import datetime, timedelta
 import uuid
+import shutil
+from openpyxl import load_workbook
+from openpyxl.drawing.image import Image as XLImage
+from io import BytesIO
 
 app = Flask(__name__)
 
@@ -67,6 +71,49 @@ def get_db():
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'xls', 'xlsx'}
+
+def evaluate_cell_value(cell):
+    """
+    Get the actual value of a cell, evaluating formulas if necessary.
+    Returns the calculated value for formulas, or the raw value otherwise.
+    """
+    # If the cell has a formula, try to get the calculated value
+    if hasattr(cell, 'value'):
+        value = cell.value
+        
+        # If it's a formula (starts with =), we need the calculated value
+        # In openpyxl, if data_only=True is used when loading, we get calculated values
+        # Otherwise, we need to handle it differently
+        
+        # For now, if it's a string starting with =, we'll need special handling
+        if isinstance(value, str) and value.startswith('='):
+            # OpenPyXL doesn't calculate formulas by default
+            # We'll need to use the data_only mode or treat formulas as non-empty
+            # For this use case, we'll treat any formula as "non-empty"
+            # unless we reload with data_only=True
+            return None  # Return None to indicate we need data_only mode
+        
+        return value
+    return None
+
+def is_empty_or_zero(val):
+    """
+    Check if a value is empty, None, zero, or blank.
+    Handles various data types appropriately.
+    """
+    if val is None:
+        return True
+    if val == 0:
+        return True
+    if val == "":
+        return True
+    if isinstance(val, str) and val.strip() == '':
+        return True
+    if isinstance(val, str) and val.strip() == '0':
+        return True
+    # Check for formulas that might evaluate to 0
+    # This would require formula evaluation which openpyxl doesn't do by default
+    return False
 
 # Authentication endpoints
 @app.route('/api/register', methods=['POST'])
@@ -221,7 +268,7 @@ def get_files():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Process file endpoint (placeholder for now)
+# Process file endpoint - UPDATED VERSION
 @app.route('/api/process/<int:file_id>', methods=['POST'])
 @jwt_required()
 def process_file(file_id):
@@ -239,20 +286,225 @@ def process_file(file_id):
         
         if not file_info:
             return jsonify({'error': 'File not found'}), 404
+            
+        input_path = os.path.join(app.config['UPLOAD_FOLDER'], file_info['stored_filename'])
         
-        # TODO: Add your Excel processing logic here
-        # For now, just mark as processed
-        conn.execute(
-            'UPDATE files SET processed = TRUE WHERE id = ?',
-            (file_id,)
-        )
-        conn.commit()
+        if not os.path.exists(input_path):
+            return jsonify({'error': 'File not found on disk'}), 404
+        
+        # Generate output filename
+        base_name = os.path.splitext(file_info['original_filename'])[0]
+        extension = os.path.splitext(file_info['original_filename'])[1]
+        output_filename = f"{base_name}_processed{extension}"
+        output_stored_filename = f"processed_{uuid.uuid4()}{extension}"
+        output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_stored_filename)
+        
+        # Process the Excel file
+        try:
+            processing_log = []
+            deleted_rows = 0
+            
+            # First, try to load with data_only=True to get calculated formula values
+            try:
+                # Load workbook with formulas evaluated
+                wb_calc = load_workbook(input_path, data_only=True)
+                
+                # Load workbook again to preserve formulas and images
+                wb_main = load_workbook(input_path, data_only=False)
+                
+                for sheet_name in wb_main.sheetnames:
+                    sheet_main = wb_main[sheet_name]
+                    sheet_calc = wb_calc[sheet_name]
+                    
+                    processing_log.append(f"Processing sheet: {sheet_name}")
+                    
+                    # Store images and their anchors before processing
+                    images_data = []
+                    if hasattr(sheet_main, '_images'):
+                        for img in sheet_main._images:
+                            images_data.append({
+                                'image': img,
+                                'anchor': img.anchor
+                            })
+                    
+                    # Find rows to delete
+                    rows_to_delete = []
+                    max_row = sheet_main.max_row
+                    
+                    for row_num in range(1, max_row + 1):
+                        # Get calculated values from the data_only workbook
+                        f_val = sheet_calc.cell(row=row_num, column=6).value
+                        g_val = sheet_calc.cell(row=row_num, column=7).value
+                        h_val = sheet_calc.cell(row=row_num, column=8).value
+                        i_val = sheet_calc.cell(row=row_num, column=9).value
+                        
+                        # Get formula values for logging
+                        f_formula = sheet_main.cell(row=row_num, column=6).value
+                        g_formula = sheet_main.cell(row=row_num, column=7).value
+                        h_formula = sheet_main.cell(row=row_num, column=8).value
+                        i_formula = sheet_main.cell(row=row_num, column=9).value
+                        
+                        # Debug logging for specific rows
+                        if 15 <= row_num <= 20:
+                            processing_log.append(
+                                f"Row {row_num}: F={f_formula}→{f_val}, G={g_formula}→{g_val}, "
+                                f"H={h_formula}→{h_val}, I={i_formula}→{i_val}"
+                            )
+                        
+                        # Check if ALL four columns are empty/zero
+                        if (is_empty_or_zero(f_val) and 
+                            is_empty_or_zero(g_val) and 
+                            is_empty_or_zero(h_val) and 
+                            is_empty_or_zero(i_val)):
+                            
+                            rows_to_delete.append(row_num)
+                            processing_log.append(
+                                f"DELETING Row {row_num}: F={f_val}, G={g_val}, H={h_val}, I={i_val}"
+                            )
+                    
+                    processing_log.append(f"Found {len(rows_to_delete)} rows to delete in {sheet_name}")
+                    
+                    # Delete rows from bottom to top
+                    for row_num in reversed(rows_to_delete):
+                        sheet_main.delete_rows(row_num)
+                        deleted_rows += 1
+                    
+                    # Re-add images with adjusted positions
+                    # Note: Image positions may need adjustment after row deletion
+                    for img_data in images_data:
+                        # You may need to adjust the anchor based on deleted rows
+                        # This is a simplified version - you might need more complex logic
+                        sheet_main.add_image(img_data['image'])
+                    
+                    processing_log.append(f"Deleted {len(rows_to_delete)} rows from {sheet_name}")
+                
+                # Save the processed file
+                wb_main.save(output_path)
+                wb_main.close()
+                wb_calc.close()
+                
+            except Exception as calc_error:
+                # Fallback: Process without formula evaluation
+                processing_log.append(f"Note: Could not evaluate formulas: {str(calc_error)}")
+                processing_log.append("Processing with formula detection only...")
+                
+                workbook = load_workbook(input_path)
+                
+                for sheet_name in workbook.sheetnames:
+                    sheet = workbook[sheet_name]
+                    processing_log.append(f"Processing sheet: {sheet_name}")
+                    
+                    rows_to_delete = []
+                    max_row = sheet.max_row
+                    
+                    for row_num in range(1, max_row + 1):
+                        f_val = sheet.cell(row=row_num, column=6).value
+                        g_val = sheet.cell(row=row_num, column=7).value
+                        h_val = sheet.cell(row=row_num, column=8).value
+                        i_val = sheet.cell(row=row_num, column=9).value
+                        
+                        # For formulas, treat them as non-empty unless we can evaluate them
+                        def is_empty_or_zero_with_formula(val):
+                            if val is None:
+                                return True
+                            if val == 0:
+                                return True
+                            if val == "":
+                                return True
+                            if isinstance(val, str):
+                                if val.strip() == '':
+                                    return True
+                                if val.strip() == '0':
+                                    return True
+                                # Don't treat formulas as empty
+                                if val.startswith('='):
+                                    return False
+                            return False
+                        
+                        # Check if ALL four columns are empty/zero
+                        if (is_empty_or_zero_with_formula(f_val) and 
+                            is_empty_or_zero_with_formula(g_val) and 
+                            is_empty_or_zero_with_formula(h_val) and 
+                            is_empty_or_zero_with_formula(i_val)):
+                            
+                            rows_to_delete.append(row_num)
+                            processing_log.append(f"DELETING Row {row_num}: All columns empty/zero")
+                    
+                    # Delete rows from bottom to top
+                    for row_num in reversed(rows_to_delete):
+                        sheet.delete_rows(row_num)
+                        deleted_rows += 1
+                    
+                    processing_log.append(f"Deleted {len(rows_to_delete)} rows from {sheet_name}")
+                
+                workbook.save(output_path)
+                workbook.close()
+            
+            # Update database
+            conn.execute(
+                'UPDATE files SET processed = TRUE WHERE id = ?',
+                (file_id,)
+            )
+            
+            # Record the processed file
+            processed_file_id = conn.execute(
+                '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed) 
+                   VALUES (?, ?, ?, ?, ?)''',
+                (file_info['user_id'], output_filename, output_stored_filename, 
+                 os.path.getsize(output_path), True)
+            ).lastrowid
+            
+            conn.commit()
+            conn.close()
+            
+            return jsonify({
+                'message': 'File processed successfully',
+                'original_file_id': file_id,
+                'processed_file_id': processed_file_id,
+                'deleted_rows': deleted_rows,
+                'processing_log': processing_log,
+                'download_filename': output_filename
+            }), 200
+            
+        except Exception as processing_error:
+            return jsonify({
+                'error': f'Processing failed: {str(processing_error)}'
+            }), 500
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Download processed file endpoint
+@app.route('/api/download/<int:file_id>', methods=['GET'])
+@jwt_required()
+def download_file(file_id):
+    try:
+        current_user_email = get_jwt_identity()
+        
+        # Get file info and verify ownership
+        conn = get_db()
+        file_info = conn.execute(
+            '''SELECT f.* FROM files f
+               JOIN users u ON f.user_id = u.id
+               WHERE f.id = ? AND u.email = ?''',
+            (file_id, current_user_email)
+        ).fetchone()
         conn.close()
         
-        return jsonify({
-            'message': 'File processed successfully',
-            'file_id': file_id
-        }), 200
+        if not file_info:
+            return jsonify({'error': 'File not found'}), 404
+            
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], file_info['stored_filename'])
+        
+        if not os.path.exists(file_path):
+            return jsonify({'error': 'File not found on disk'}), 404
+            
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name=file_info['original_filename'],
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
