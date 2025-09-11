@@ -4,15 +4,14 @@ from flask_jwt_extended import JWTManager, jwt_required, create_access_token, ge
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 import sqlite3
-import pandas as pd
 import os
 from datetime import datetime, timedelta
 import uuid
-import shutil
 from openpyxl import load_workbook
-from openpyxl.drawing.image import Image as XLImage
-from io import BytesIO
 import hashlib
+import requests
+import secrets
+import json
 
 app = Flask(__name__)
 
@@ -84,6 +83,24 @@ def init_db():
             upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             processed BOOLEAN DEFAULT FALSE,
             FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+
+    # Add job tracking table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS processing_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT UNIQUE NOT NULL,
+            user_id INTEGER,
+            original_file_id INTEGER,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            result_file_id INTEGER,
+            error_message TEXT,
+            FOREIGN KEY (user_id) REFERENCES users (id),
+            FOREIGN KEY (original_file_id) REFERENCES files (id),
+            FOREIGN KEY (result_file_id) REFERENCES files (id)
         )
     ''')
 
@@ -859,6 +876,232 @@ def debug_storage():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/process-automated/<int:file_id>', methods=['POST'])
+@jwt_required()
+def process_file_automated(file_id):
+    """Trigger GitHub Actions processing"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        # Get file info and verify ownership
+        conn = get_db()
+        user = conn.execute(
+            'SELECT id FROM users WHERE email = ?', (current_user_email,)
+        ).fetchone()
+        
+        file_info = conn.execute(
+            '''SELECT f.* FROM files f
+               WHERE f.id = ? AND f.user_id = ?''',
+            (file_id, user['id'])
+        ).fetchone()
+        
+        if not file_info:
+            return jsonify({'error': 'File not found'}), 404
+        
+        # Analyze the file first to generate macro
+        input_path = os.path.join(app.config['UPLOAD_FOLDER'], file_info['stored_filename'])
+        rows_to_delete_by_sheet = analyze_excel_file(input_path)
+        
+        if not rows_to_delete_by_sheet:
+            return jsonify({'message': 'No rows to delete'}), 200
+        
+        # Generate macro content
+        macro_content = generate_libreoffice_macro(
+            file_info['original_filename'], 
+            rows_to_delete_by_sheet
+        )
+        
+        # Create job ID
+        job_id = secrets.token_urlsafe(16)
+        
+        # Store job in database
+        conn.execute(
+            '''INSERT INTO processing_jobs (job_id, user_id, original_file_id, status)
+               VALUES (?, ?, ?, ?)''',
+            (job_id, user['id'], file_id, 'pending')
+        )
+        conn.commit()
+        conn.close()
+        
+        # Trigger GitHub Actions
+        github_payload = {
+            "event_type": "process-excel",
+            "client_payload": {
+                "job_id": job_id,
+                "download_url": f"{request.host_url}api/download/{file_id}",
+                "callback_url": f"{request.host_url}api/processing-callback",
+                "macro_content": macro_content
+            }
+        }
+        
+        headers = {
+            'Authorization': f'token {os.getenv("GITHUB_TOKEN")}',
+            'Accept': 'application/vnd.github.v3+json',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.post(
+            f'https://api.github.com/repos/{os.getenv("GITHUB_REPO")}/dispatches',
+            headers=headers,
+            json=github_payload
+        )
+        
+        if response.status_code == 204:
+            return jsonify({
+                'message': 'Processing started',
+                'job_id': job_id,
+                'status': 'pending',
+                'estimated_time': '2-3 minutes'
+            }), 202
+        else:
+            return jsonify({
+                'error': 'Failed to start processing',
+                'details': response.text
+            }), 500
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/processing-callback', methods=['POST'])
+def processing_callback():
+    """Receive results from GitHub Actions"""
+    try:
+        # Verify the request is from GitHub (optional but recommended)
+        
+        if request.content_type == 'application/json':
+            # Status update
+            data = request.get_json()
+            job_id = data.get('job_id')
+            status = data.get('status')
+            error = data.get('error')
+            
+            conn = get_db()
+            if status == 'failed':
+                conn.execute(
+                    '''UPDATE processing_jobs 
+                       SET status = ?, error_message = ?, completed_at = ?
+                       WHERE job_id = ?''',
+                    ('failed', error, datetime.utcnow(), job_id)
+                )
+            conn.commit()
+            conn.close()
+            
+            return jsonify({'status': 'received'}), 200
+            
+        else:
+            # File upload
+            job_id = request.form.get('job_id')
+            uploaded_file = request.files.get('file')
+            
+            if not job_id or not uploaded_file:
+                return jsonify({'error': 'Missing job_id or file'}), 400
+            
+            # Save the processed file
+            output_filename = f"processed_{uuid.uuid4()}.xlsx"
+            output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
+            uploaded_file.save(output_path)
+            
+            # Update database
+            conn = get_db()
+            job = conn.execute(
+                'SELECT * FROM processing_jobs WHERE job_id = ?', (job_id,)
+            ).fetchone()
+            
+            if job:
+                # Create file record
+                file_id = conn.execute(
+                    '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed)
+                       VALUES (?, ?, ?, ?, ?)''',
+                    (job['user_id'], f"processed_{job_id}.xlsx", output_filename, 
+                     os.path.getsize(output_path), True)
+                ).lastrowid
+                
+                # Update job status
+                conn.execute(
+                    '''UPDATE processing_jobs 
+                       SET status = ?, result_file_id = ?, completed_at = ?
+                       WHERE job_id = ?''',
+                    ('completed', file_id, datetime.utcnow(), job_id)
+                )
+                conn.commit()
+            
+            conn.close()
+            return jsonify({'status': 'received'}), 200
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/job-status/<job_id>', methods=['GET'])
+@jwt_required()
+def get_job_status(job_id):
+    """Check processing job status"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        conn = get_db()
+        user = conn.execute(
+            'SELECT id FROM users WHERE email = ?', (current_user_email,)
+        ).fetchone()
+        
+        job = conn.execute(
+            '''SELECT pj.*, f.original_filename as result_filename
+               FROM processing_jobs pj
+               LEFT JOIN files f ON pj.result_file_id = f.id
+               WHERE pj.job_id = ? AND pj.user_id = ?''',
+            (job_id, user['id'])
+        ).fetchone()
+        conn.close()
+        
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        response = {
+            'job_id': job['job_id'],
+            'status': job['status'],
+            'created_at': job['created_at']
+        }
+        
+        if job['status'] == 'completed':
+            response['download_file_id'] = job['result_file_id']
+            response['download_filename'] = job['result_filename']
+        elif job['status'] == 'failed':
+            response['error'] = job['error_message']
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def analyze_excel_file(input_path):
+    """Analyze Excel file to find rows to delete (using your existing logic)"""
+    try:
+        wb = load_workbook(input_path, data_only=True)
+        rows_to_delete_by_sheet = {}
+        
+        for sheet_name in wb.sheetnames:
+            sheet = wb[sheet_name]
+            rows_to_delete = []
+            
+            for row_num in range(1, sheet.max_row + 1):
+                f_val = sheet.cell(row=row_num, column=6).value
+                g_val = sheet.cell(row=row_num, column=7).value
+                h_val = sheet.cell(row=row_num, column=8).value
+                i_val = sheet.cell(row=row_num, column=9).value
+                
+                if (is_empty_or_zero(f_val) and is_empty_or_zero(g_val) and 
+                    is_empty_or_zero(h_val) and is_empty_or_zero(i_val)):
+                    rows_to_delete.append(row_num)
+            
+            if rows_to_delete:
+                rows_to_delete_by_sheet[sheet_name] = rows_to_delete
+        
+        wb.close()
+        return rows_to_delete_by_sheet
+        
+    except Exception as e:
+        print(f"Analysis error: {e}")
+        return {}
 
 # Health check
 @app.route('/api/health', methods=['GET'])

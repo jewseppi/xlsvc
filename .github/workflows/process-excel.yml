@@ -1,0 +1,122 @@
+name: Process Excel File
+
+on:
+  repository_dispatch:
+    types: [process-excel]
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install LibreOffice
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-calc
+
+      - name: Download input file
+        run: |
+          echo "Downloading file from: ${{ github.event.client_payload.download_url }}"
+          curl -H "Authorization: Bearer ${{ secrets.API_TOKEN }}" \
+               -o input.xlsx \
+               "${{ github.event.client_payload.download_url }}"
+
+      - name: Create macro file
+        run: |
+          cat > macro.bas << 'EOF'
+          ${{ github.event.client_payload.macro_content }}
+          EOF
+
+      - name: Process file with LibreOffice
+        run: |
+          # Copy macro to LibreOffice user directory
+          mkdir -p ~/.config/libreoffice/4/user/basic/Standard
+          cp macro.bas ~/.config/libreoffice/4/user/basic/Standard/Module1.bas
+
+          # Create Basic script runner
+          cat > run_macro.py << 'EOF'
+          import uno
+          import sys
+          import os
+          from com.sun.star.beans import PropertyValue
+
+          def run_macro():
+              # Connect to LibreOffice
+              localContext = uno.getComponentContext()
+              resolver = localContext.ServiceManager.createInstanceWithContext(
+                  "com.sun.star.bridge.UnoUrlResolver", localContext)
+              
+              try:
+                  context = resolver.resolve("uno:socket,host=localhost,port=2002;urp;StarOffice.ComponentContext")
+              except:
+                  # Start LibreOffice in headless mode
+                  os.system('libreoffice --headless --accept="socket,host=127.0.0.1,port=2002;urp;" &')
+                  import time
+                  time.sleep(3)
+                  context = resolver.resolve("uno:socket,host=localhost,port=2002;urp;StarOffice.ComponentContext")
+              
+              desktop = context.ServiceManager.createInstanceWithContext(
+                  "com.sun.star.frame.Desktop", context)
+              
+              # Open the Excel file
+              url = uno.systemPathToFileUrl(os.path.abspath("input.xlsx"))
+              document = desktop.loadComponentFromURL(url, "_blank", 0, ())
+              
+              # Execute the macro
+              try:
+                  # Get the macro
+                  provider = context.ServiceManager.createInstance(
+                      "com.sun.star.script.provider.MasterScriptProviderFactory")
+                  script_provider = provider.createScriptProvider("")
+                  
+                  # Run the DeleteEmptyRows macro
+                  script = script_provider.getScript(
+                      "vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=user")
+                  script.invoke([], [], [])
+                  
+                  # Save the document
+                  document.storeAsURL(uno.systemPathToFileUrl(os.path.abspath("output.xlsx")), ())
+                  print("Processing completed successfully")
+                  
+              except Exception as e:
+                  print(f"Macro execution error: {e}")
+                  return False
+              finally:
+                  document.close(True)
+                  
+              return True
+
+          if __name__ == "__main__":
+              success = run_macro()
+              sys.exit(0 if success else 1)
+          EOF
+
+          # Install UNO Python bindings
+          sudo apt-get install -y python3-uno
+
+          # Run the processing
+          python3 run_macro.py
+
+      - name: Upload processed file
+        if: success()
+        run: |
+          # Upload the processed file back to your server
+          curl -X POST \
+               -H "Authorization: Bearer ${{ secrets.API_TOKEN }}" \
+               -H "Content-Type: multipart/form-data" \
+               -F "file=@output.xlsx" \
+               -F "job_id=${{ github.event.client_payload.job_id }}" \
+               "${{ github.event.client_payload.callback_url }}"
+
+      - name: Report failure
+        if: failure()
+        run: |
+          curl -X POST \
+               -H "Authorization: Bearer ${{ secrets.API_TOKEN }}" \
+               -H "Content-Type: application/json" \
+               -d '{"job_id":"${{ github.event.client_payload.job_id }}","status":"failed","error":"Processing failed"}' \
+               "${{ github.event.client_payload.callback_url }}"
