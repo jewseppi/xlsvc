@@ -20,7 +20,7 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.HOST }} >> ~/.ssh/known_hosts
 
-      - name: Deploy Flask Backend to subdomain
+      - name: Deploy Flask Backend
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.HOST }}
@@ -29,26 +29,14 @@ jobs:
           script: |
             set -euo pipefail
 
-            # Navigate to subdomain directory
+            # Create backup of working files first
             cd ~/public_html/xlsvc
+            mkdir -p backup_$(date +%Y%m%d_%H%M%S)
+            cp *.py requirements.txt .htaccess passenger_wsgi.py backup_$(date +%Y%m%d_%H%M%S)/ 2>/dev/null || echo "No files to backup"
 
-            # Remove old Python files but keep uploads and database
-            find . -name "*.py" -delete 2>/dev/null || true
-            rm -f requirements.txt .htaccess passenger_wsgi.py 2>/dev/null || true
+            echo "Backup created, proceeding with deployment"
 
-            echo "Old files cleaned, ready for new deployment"
-
-      - name: Upload Python files
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "*.py,requirements.txt"
-          target: "~/public_html/xlsvc/"
-          strip_components: 0
-
-      - name: Install dependencies and setup backend
+      - name: Upload Backend Files via SSH
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.HOST }}
@@ -57,43 +45,63 @@ jobs:
           script: |
             set -euo pipefail
 
+            # Create temp directory for uploads
+            mkdir -p ~/temp_xlsvc_deploy
+            cd ~/temp_xlsvc_deploy
+
+            # Clean up any previous temp files
+            rm -f *.py requirements.txt 2>/dev/null || true
+
+      - name: Transfer Files with rsync
+        run: |
+          # Use rsync instead of SCP action - more reliable
+          rsync -avz -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no" \
+            --include="*.py" \
+            --include="requirements.txt" \
+            --exclude="*" \
+            ./ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:~/temp_xlsvc_deploy/
+
+      - name: Install Dependencies and Setup Backend
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+
+            # Move files from temp to production
+            cd ~/temp_xlsvc_deploy
+            cp *.py requirements.txt ~/public_html/xlsvc/
+
+            # Navigate to production directory
             cd ~/public_html/xlsvc
 
             # Activate virtual environment
             source ~/virtualenv/public_html/xlsvc/3.11/bin/activate
 
-            # Fix numpy/pandas compatibility issue
-            pip uninstall pandas numpy -y || true
-            pip install --no-binary=numpy,pandas numpy==1.24.3 pandas==2.1.1
-
-            # Install other dependencies
+            # Update pip and install dependencies
+            pip install --upgrade pip
             pip install -r requirements.txt
 
             # Create passenger_wsgi.py
             cat > passenger_wsgi.py << 'WSGI_EOF'
             import os
             import sys
-
-            # Add your application directory to the Python path
             sys.path.insert(0, os.path.dirname(__file__))
-
             from main import app as application
-
-            if __name__ == "__main__":
-                application.run()
             WSGI_EOF
 
             # Create uploads directory
-            mkdir -p uploads
+            mkdir -p uploads tmp
             chmod 755 uploads
 
             # Initialize database if it doesn't exist
             if [ ! -f xlsvc.db ]; then
-              python -c "from main import init_db; init_db()"
-              echo "Database initialized"
+              python -c "from main import init_db; init_db()" || echo "Database init skipped"
             fi
 
-            # Create .htaccess for subdomain
+            # Create .htaccess
             cat > .htaccess << 'HTACCESS_EOF'
             RewriteEngine On
             PassengerEnabled on
@@ -106,11 +114,11 @@ jobs:
             RewriteCond %{REQUEST_METHOD} OPTIONS
             RewriteRule ^(.*)$ $1 [R=200,L]
 
-            # Handle API requests - route to Python app
+            # Handle API requests
             RewriteCond %{REQUEST_URI} ^/api/
             RewriteRule ^api/(.*)$ passenger_wsgi.py/$1 [QSA,L]
 
-            # Handle React Router - serve static files first, then index.html
+            # Handle React Router for frontend
             RewriteCond %{REQUEST_FILENAME} !-f
             RewriteCond %{REQUEST_FILENAME} !-d
             RewriteCond %{REQUEST_URI} !^/api/
@@ -120,11 +128,13 @@ jobs:
             # Set permissions
             chmod 644 *.py requirements.txt .htaccess passenger_wsgi.py 2>/dev/null || true
             chmod 755 uploads
-            chmod 644 xlsvc.db 2>/dev/null || true
+
+            # Clean up temp directory
+            rm -rf ~/temp_xlsvc_deploy
 
             echo "Backend deployment complete!"
 
-      - name: Build React frontend for subdomain
+      - name: Build React Frontend
         run: |
           # Update API base URL for subdomain
           sed -i 's|http://127.0.0.1:5000/api|https://excel.processor.jsilverman.ca/api|g' src/App.jsx
@@ -133,20 +143,23 @@ jobs:
           npm ci
           npm run build
 
-          # Create archive
-          cd dist
-          tar -czf ../frontend.tar.gz .
+      - name: Deploy Frontend via rsync
+        run: |
+          # Deploy React build files
+          rsync -avz -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no" \
+            --delete-after \
+            --exclude="*.py" \
+            --exclude="requirements.txt" \
+            --exclude="passenger_wsgi.py" \
+            --exclude=".htaccess" \
+            --exclude="xlsvc.db" \
+            --exclude="uploads/" \
+            --exclude="__pycache__/" \
+            --exclude="tmp/" \
+            --exclude="backup_*/" \
+            dist/ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:~/public_html/xlsvc/
 
-      - name: Upload frontend files
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "frontend.tar.gz"
-          target: "~/"
-
-      - name: Deploy frontend to subdomain
+      - name: Final Setup and Restart
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.HOST }}
@@ -157,18 +170,8 @@ jobs:
 
             cd ~/public_html/xlsvc
 
-            # Remove old frontend files but keep Python backend files
-            find . -name "*.html" -delete 2>/dev/null || true
-            find . -name "*.js" -delete 2>/dev/null || true
-            find . -name "*.css" -delete 2>/dev/null || true
-            rm -rf assets 2>/dev/null || true
-
-            # Extract new frontend
-            tar -xzf ~/frontend.tar.gz
-            rm ~/frontend.tar.gz
-
             # Update .htaccess to handle both frontend and backend
-            cat > .htaccess << 'HTACCESS_EOF'
+            cat > .htaccess << 'FINAL_HTACCESS'
             RewriteEngine On
             PassengerEnabled on
             PassengerAppRoot /home/glqltckdiqd1/public_html/xlsvc
@@ -180,7 +183,7 @@ jobs:
             RewriteCond %{REQUEST_METHOD} OPTIONS
             RewriteRule ^(.*)$ $1 [R=200,L]
 
-            # Handle API requests - route to Python app
+            # Handle API requests
             RewriteCond %{REQUEST_URI} ^/api/
             RewriteRule ^api/(.*)$ passenger_wsgi.py/$1 [QSA,L]
 
@@ -189,21 +192,25 @@ jobs:
             RewriteCond %{REQUEST_FILENAME} !-d
             RewriteCond %{REQUEST_URI} !^/api/
             RewriteRule . index.html [L]
-            HTACCESS_EOF
+            FINAL_HTACCESS
 
-            # Set permissions
-            find . -type f -exec chmod 644 {} \;
-            find . -type d -exec chmod 755 {} \;
+            # Set final permissions
+            find . -type f -exec chmod 644 {} \; 2>/dev/null || true
+            find . -type d -exec chmod 755 {} \; 2>/dev/null || true
+            chmod 755 uploads 2>/dev/null || true
 
             # Restart Passenger
             mkdir -p tmp
             touch tmp/restart.txt
 
-            echo "Full-stack deployment complete!"
+            echo "Full deployment complete!"
 
-      - name: Verify deployment
+      - name: Verify Deployment
         run: |
-          echo "XLSVC Deployment complete ✅"
+          echo "XLSVC Deployment complete!"
           echo "App: https://excel.processor.jsilverman.ca"
           echo "API Health: https://excel.processor.jsilverman.ca/api/health"
-          echo "Note: First load may take 30-60 seconds for Python app to start"
+          echo ""
+          echo "Testing API endpoint..."
+          sleep 10
+          curl -f https://excel.processor.jsilverman.ca/api/health || echo "API not responding yet - may need a few more seconds"
