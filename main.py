@@ -24,7 +24,7 @@ app.config['MACROS_FOLDER'] = 'macros'
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 
 # Initialize extensions
-CORS(app, origins=['http://localhost:5173', 'https://app.xlsvc.jsilverman.ca'])
+CORS(app, origins=['http://localhost:5173', 'https://excel.processor.jsilverman.ca'])
 jwt = JWTManager(app)
 
 def calculate_file_hash(file_path):

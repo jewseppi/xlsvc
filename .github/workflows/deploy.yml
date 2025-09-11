@@ -1,22 +1,209 @@
-name: Deploy to Production
+name: Deploy XLSVC to excel.processor.jsilverman.ca
+
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
-      - name: Deploy via git pull
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy Flask Backend to subdomain
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd ${{ secrets.DEPLOY_PATH }}
-            git pull origin main
-            sed -i 's|PASSENGER_APP_ROOT_PLACEHOLDER|${{ secrets.PASSENGER_APP_ROOT }}|g' .htaccess
-            sed -i 's|PASSENGER_PYTHON_PATH_PLACEHOLDER|${{ secrets.PASSENGER_PYTHON_PATH }}|g' .htaccess
+            set -euo pipefail
+
+            # Navigate to subdomain directory
+            cd ~/public_html/xlsvc
+
+            # Remove old Python files but keep uploads and database
+            find . -name "*.py" -delete 2>/dev/null || true
+            rm -f requirements.txt .htaccess passenger_wsgi.py 2>/dev/null || true
+
+            echo "Old files cleaned, ready for new deployment"
+
+      - name: Upload Python files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "*.py,requirements.txt"
+          target: "~/public_html/xlsvc/"
+          strip_components: 0
+
+      - name: Install dependencies and setup backend
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+
+            cd ~/public_html/xlsvc
+
+            # Activate virtual environment
+            source ~/virtualenv/public_html/xlsvc/3.11/bin/activate
+
+            # Fix numpy/pandas compatibility issue
+            pip uninstall pandas numpy -y || true
+            pip install --no-binary=numpy,pandas numpy==1.24.3 pandas==2.1.1
+
+            # Install other dependencies
+            pip install -r requirements.txt
+
+            # Create passenger_wsgi.py
+            cat > passenger_wsgi.py << 'WSGI_EOF'
+            import os
+            import sys
+
+            # Add your application directory to the Python path
+            sys.path.insert(0, os.path.dirname(__file__))
+
+            from main import app as application
+
+            if __name__ == "__main__":
+                application.run()
+            WSGI_EOF
+
+            # Create uploads directory
+            mkdir -p uploads
+            chmod 755 uploads
+
+            # Initialize database if it doesn't exist
+            if [ ! -f xlsvc.db ]; then
+              python -c "from main import init_db; init_db()"
+              echo "Database initialized"
+            fi
+
+            # Create .htaccess for subdomain
+            cat > .htaccess << 'HTACCESS_EOF'
+            RewriteEngine On
+            PassengerEnabled on
+            PassengerAppRoot /home/glqltckdiqd1/public_html/xlsvc
+            PassengerAppType wsgi
+            PassengerStartupFile passenger_wsgi.py
+            PassengerPython /home/glqltckdiqd1/virtualenv/public_html/xlsvc/3.11/bin/python
+
+            # Handle CORS preflight
+            RewriteCond %{REQUEST_METHOD} OPTIONS
+            RewriteRule ^(.*)$ $1 [R=200,L]
+
+            # Handle API requests - route to Python app
+            RewriteCond %{REQUEST_URI} ^/api/
+            RewriteRule ^api/(.*)$ passenger_wsgi.py/$1 [QSA,L]
+
+            # Handle React Router - serve static files first, then index.html
+            RewriteCond %{REQUEST_FILENAME} !-f
+            RewriteCond %{REQUEST_FILENAME} !-d
+            RewriteCond %{REQUEST_URI} !^/api/
+            RewriteRule . index.html [L]
+            HTACCESS_EOF
+
+            # Set permissions
+            chmod 644 *.py requirements.txt .htaccess passenger_wsgi.py 2>/dev/null || true
+            chmod 755 uploads
+            chmod 644 xlsvc.db 2>/dev/null || true
+
+            echo "Backend deployment complete!"
+
+      - name: Build React frontend for subdomain
+        run: |
+          # Update API base URL for subdomain
+          sed -i 's|http://127.0.0.1:5000/api|https://excel.processor.jsilverman.ca/api|g' src/App.jsx
+
+          # Install and build
+          npm ci
+          npm run build
+
+          # Create archive
+          cd dist
+          tar -czf ../frontend.tar.gz .
+
+      - name: Upload frontend files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "frontend.tar.gz"
+          target: "~/"
+
+      - name: Deploy frontend to subdomain
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+
+            cd ~/public_html/xlsvc
+
+            # Remove old frontend files but keep Python backend files
+            find . -name "*.html" -delete 2>/dev/null || true
+            find . -name "*.js" -delete 2>/dev/null || true
+            find . -name "*.css" -delete 2>/dev/null || true
+            rm -rf assets 2>/dev/null || true
+
+            # Extract new frontend
+            tar -xzf ~/frontend.tar.gz
+            rm ~/frontend.tar.gz
+
+            # Update .htaccess to handle both frontend and backend
+            cat > .htaccess << 'HTACCESS_EOF'
+            RewriteEngine On
+            PassengerEnabled on
+            PassengerAppRoot /home/glqltckdiqd1/public_html/xlsvc
+            PassengerAppType wsgi
+            PassengerStartupFile passenger_wsgi.py
+            PassengerPython /home/glqltckdiqd1/virtualenv/public_html/xlsvc/3.11/bin/python
+
+            # Handle CORS preflight
+            RewriteCond %{REQUEST_METHOD} OPTIONS
+            RewriteRule ^(.*)$ $1 [R=200,L]
+
+            # Handle API requests - route to Python app
+            RewriteCond %{REQUEST_URI} ^/api/
+            RewriteRule ^api/(.*)$ passenger_wsgi.py/$1 [QSA,L]
+
+            # Handle React Router - serve static files first, then index.html
+            RewriteCond %{REQUEST_FILENAME} !-f
+            RewriteCond %{REQUEST_FILENAME} !-d
+            RewriteCond %{REQUEST_URI} !^/api/
+            RewriteRule . index.html [L]
+            HTACCESS_EOF
+
+            # Set permissions
+            find . -type f -exec chmod 644 {} \;
+            find . -type d -exec chmod 755 {} \;
+
+            # Restart Passenger
+            mkdir -p tmp
             touch tmp/restart.txt
+
+            echo "Full-stack deployment complete!"
+
+      - name: Verify deployment
+        run: |
+          echo "XLSVC Deployment complete ✅"
+          echo "App: https://excel.processor.jsilverman.ca"
+          echo "API Health: https://excel.processor.jsilverman.ca/api/health"
+          echo "Note: First load may take 30-60 seconds for Python app to start"
