@@ -12,6 +12,7 @@ import shutil
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from io import BytesIO
+import hashlib
 
 app = Flask(__name__)
 
@@ -19,14 +20,43 @@ app = Flask(__name__)
 app.config['JWT_SECRET_KEY'] = 'your-secret-key-change-this'  # Change this!
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
 app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['PROCESSED_FOLDER'] = 'processed'
+app.config['MACROS_FOLDER'] = 'macros'
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 
 # Initialize extensions
 CORS(app, origins=['http://localhost:5173', 'https://app.xlsvc.jsilverman.ca'])
 jwt = JWTManager(app)
 
-# Ensure upload directory exists
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+def calculate_file_hash(file_path):
+    """Calculate SHA256 hash of a file"""
+    hash_sha256 = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_sha256.update(chunk)
+    return hash_sha256.hexdigest()
+
+# Ensure all directories exist
+def ensure_directories():
+    """Create all necessary directories"""
+    dirs = [
+        app.config['UPLOAD_FOLDER'],
+        app.config['PROCESSED_FOLDER'], 
+        app.config['MACROS_FOLDER']
+    ]
+    for dir_path in dirs:
+        os.makedirs(dir_path, exist_ok=True)
+
+def get_file_path(file_type, filename):
+    """Get the correct storage path based on file type"""
+    if file_type == 'original' or file_type is None:
+        return os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    elif file_type == 'processed':
+        return os.path.join(app.config['PROCESSED_FOLDER'], filename)
+    elif file_type in ['macro', 'instructions']:
+        return os.path.join(app.config['MACROS_FOLDER'], filename)
+    else:
+        return os.path.join(app.config['UPLOAD_FOLDER'], filename)
 
 # Database setup
 def init_db():
@@ -56,12 +86,25 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
     ''')
+
+    # Add file_hash column if it doesn't exist
+    try:
+        cursor.execute('ALTER TABLE files ADD COLUMN file_hash TEXT')
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    
+    # Add file_type column to categorize files
+    try:
+        cursor.execute('ALTER TABLE files ADD COLUMN file_type TEXT DEFAULT "original"')
+    except sqlite3.OperationalError:
+        pass
     
     conn.commit()
     conn.close()
 
 # Initialize database on startup
 init_db()
+ensure_directories()
 
 # Helper functions
 def get_db():
@@ -212,21 +255,41 @@ def upload_file():
         if not allowed_file(file.filename):
             return jsonify({'error': 'Only .xls and .xlsx files allowed'}), 400
         
-        # Generate unique filename
+        # Generate unique filename for storage
         original_filename = secure_filename(file.filename)
         file_extension = original_filename.rsplit('.', 1)[1].lower()
         stored_filename = f"{uuid.uuid4()}.{file_extension}"
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
         
-        # Save file
+        # Save file temporarily to calculate hash
         file.save(file_path)
         file_size = os.path.getsize(file_path)
+        file_hash = calculate_file_hash(file_path)
         
-        # Save to database
+        # Check if this exact file already exists for this user
+        existing_file = conn.execute(
+            '''SELECT id, original_filename FROM files 
+               WHERE user_id = ? AND file_hash = ? AND original_filename = ?''',
+            (user_id, file_hash, original_filename)
+        ).fetchone()
+        
+        if existing_file:
+            # Delete the newly uploaded duplicate
+            os.remove(file_path)
+            conn.close()
+            
+            return jsonify({
+                'message': 'File already exists',
+                'file_id': existing_file['id'],
+                'filename': existing_file['original_filename'],
+                'duplicate': True
+            }), 200
+        
+        # Save to database with hash
         file_id = conn.execute(
-            '''INSERT INTO files (user_id, original_filename, stored_filename, file_size) 
-               VALUES (?, ?, ?, ?)''',
-            (user_id, original_filename, stored_filename, file_size)
+            '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, file_hash) 
+               VALUES (?, ?, ?, ?, ?)''',
+            (user_id, original_filename, stored_filename, file_size, file_hash)
         ).lastrowid
         conn.commit()
         conn.close()
@@ -235,7 +298,8 @@ def upload_file():
             'message': 'File uploaded successfully',
             'file_id': file_id,
             'filename': original_filename,
-            'size': file_size
+            'size': file_size,
+            'duplicate': False
         }), 201
         
     except Exception as e:
@@ -245,30 +309,51 @@ def upload_file():
 @app.route('/api/files', methods=['GET'])
 @jwt_required()
 def get_files():
+    """Get user's files with proper filtering"""
     try:
         current_user_email = get_jwt_identity()
         
         conn = get_db()
         files = conn.execute(
-            '''SELECT f.id, f.original_filename, f.file_size, f.upload_date, f.processed
+            '''SELECT f.id, f.original_filename, f.file_size, f.upload_date, f.processed, f.file_type, f.stored_filename
                FROM files f
                JOIN users u ON f.user_id = u.id
-               WHERE u.email = ?
+               WHERE u.email = ? AND (f.file_type = 'original' OR f.file_type IS NULL)
                ORDER BY f.upload_date DESC''',
             (current_user_email,)
         ).fetchall()
+        
+        # Convert to list of dictionaries and check if files exist on disk
+        valid_files = []
+        for file in files:
+            file_dict = dict(file)
+            
+            # Get the correct file path
+            file_type = file_dict.get('file_type') or 'original'
+            stored_filename = file_dict.get('stored_filename', '')
+            
+            if file_type == 'original':
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
+            else:
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)  # fallback to uploads
+            
+            # Only include files that actually exist on disk
+            if stored_filename and os.path.exists(file_path):
+                valid_files.append(file_dict)
+            else:
+                print(f"DEBUG: File not found on disk: {file_path}")
+        
         conn.close()
         
-        files_list = [dict(file) for file in files]
-        
         return jsonify({
-            'files': files_list
+            'files': valid_files
         }), 200
         
     except Exception as e:
+        print(f"DEBUG: get_files error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-# Process file endpoint - UPDATED VERSION
+# Update the process endpoint to use proper file organization
 @app.route('/api/process/<int:file_id>', methods=['POST'])
 @jwt_required()
 def process_file(file_id):
@@ -286,195 +371,344 @@ def process_file(file_id):
         
         if not file_info:
             return jsonify({'error': 'File not found'}), 404
-            
-        input_path = os.path.join(app.config['UPLOAD_FOLDER'], file_info['stored_filename'])
+        
+        # Convert to dict to avoid sqlite3.Row issues
+        file_dict = dict(file_info)
+        
+        # Get file path (keep it simple for now - just use uploads folder)
+        input_path = os.path.join(app.config['UPLOAD_FOLDER'], file_dict['stored_filename'])
         
         if not os.path.exists(input_path):
             return jsonify({'error': 'File not found on disk'}), 404
         
-        # Generate output filename
-        base_name = os.path.splitext(file_info['original_filename'])[0]
-        extension = os.path.splitext(file_info['original_filename'])[1]
-        output_filename = f"{base_name}_processed{extension}"
-        output_stored_filename = f"processed_{uuid.uuid4()}{extension}"
-        output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_stored_filename)
+        # Analyze the Excel file to find rows to delete
+        processing_log = []
+        rows_to_delete_by_sheet = {}
+        total_rows_to_delete = 0
         
-        # Process the Excel file
         try:
-            processing_log = []
-            deleted_rows = 0
+            # Load workbook with calculated values for analysis
+            wb_calc = load_workbook(input_path, data_only=True)
             
-            # First, try to load with data_only=True to get calculated formula values
-            try:
-                # Load workbook with formulas evaluated
-                wb_calc = load_workbook(input_path, data_only=True)
+            for sheet_name in wb_calc.sheetnames:
+                sheet = wb_calc[sheet_name]
+                processing_log.append(f"Analyzing sheet: {sheet_name}")
                 
-                # Load workbook again to preserve formulas and images
-                wb_main = load_workbook(input_path, data_only=False)
+                rows_to_delete = []
+                max_row = sheet.max_row
                 
-                for sheet_name in wb_main.sheetnames:
-                    sheet_main = wb_main[sheet_name]
-                    sheet_calc = wb_calc[sheet_name]
+                for row_num in range(1, max_row + 1):
+                    # Get values from columns F, G, H, I (6, 7, 8, 9)
+                    f_val = sheet.cell(row=row_num, column=6).value
+                    g_val = sheet.cell(row=row_num, column=7).value
+                    h_val = sheet.cell(row=row_num, column=8).value
+                    i_val = sheet.cell(row=row_num, column=9).value
                     
-                    processing_log.append(f"Processing sheet: {sheet_name}")
-                    
-                    # Store images and their anchors before processing
-                    images_data = []
-                    if hasattr(sheet_main, '_images'):
-                        for img in sheet_main._images:
-                            images_data.append({
-                                'image': img,
-                                'anchor': img.anchor
-                            })
-                    
-                    # Find rows to delete
-                    rows_to_delete = []
-                    max_row = sheet_main.max_row
-                    
-                    for row_num in range(1, max_row + 1):
-                        # Get calculated values from the data_only workbook
-                        f_val = sheet_calc.cell(row=row_num, column=6).value
-                        g_val = sheet_calc.cell(row=row_num, column=7).value
-                        h_val = sheet_calc.cell(row=row_num, column=8).value
-                        i_val = sheet_calc.cell(row=row_num, column=9).value
+                    # Check if ALL four columns are empty/zero
+                    if (is_empty_or_zero(f_val) and 
+                        is_empty_or_zero(g_val) and 
+                        is_empty_or_zero(h_val) and 
+                        is_empty_or_zero(i_val)):
                         
-                        # Get formula values for logging
-                        f_formula = sheet_main.cell(row=row_num, column=6).value
-                        g_formula = sheet_main.cell(row=row_num, column=7).value
-                        h_formula = sheet_main.cell(row=row_num, column=8).value
-                        i_formula = sheet_main.cell(row=row_num, column=9).value
-                        
-                        # Debug logging for specific rows
-                        if 15 <= row_num <= 20:
-                            processing_log.append(
-                                f"Row {row_num}: F={f_formula}→{f_val}, G={g_formula}→{g_val}, "
-                                f"H={h_formula}→{h_val}, I={i_formula}→{i_val}"
-                            )
-                        
-                        # Check if ALL four columns are empty/zero
-                        if (is_empty_or_zero(f_val) and 
-                            is_empty_or_zero(g_val) and 
-                            is_empty_or_zero(h_val) and 
-                            is_empty_or_zero(i_val)):
-                            
-                            rows_to_delete.append(row_num)
-                            processing_log.append(
-                                f"DELETING Row {row_num}: F={f_val}, G={g_val}, H={h_val}, I={i_val}"
-                            )
-                    
-                    processing_log.append(f"Found {len(rows_to_delete)} rows to delete in {sheet_name}")
-                    
-                    # Delete rows from bottom to top
-                    for row_num in reversed(rows_to_delete):
-                        sheet_main.delete_rows(row_num)
-                        deleted_rows += 1
-                    
-                    # Re-add images with adjusted positions
-                    # Note: Image positions may need adjustment after row deletion
-                    for img_data in images_data:
-                        # You may need to adjust the anchor based on deleted rows
-                        # This is a simplified version - you might need more complex logic
-                        sheet_main.add_image(img_data['image'])
-                    
-                    processing_log.append(f"Deleted {len(rows_to_delete)} rows from {sheet_name}")
+                        rows_to_delete.append(row_num)
+                        if len(rows_to_delete) <= 5:  # Only log first 5 for brevity
+                            processing_log.append(f"Row {row_num} marked for deletion: F={f_val}, G={g_val}, H={h_val}, I={i_val}")
                 
-                # Save the processed file
-                wb_main.save(output_path)
-                wb_main.close()
-                wb_calc.close()
+                if len(rows_to_delete) > 5:
+                    processing_log.append(f"... and {len(rows_to_delete) - 5} more rows")
                 
-            except Exception as calc_error:
-                # Fallback: Process without formula evaluation
-                processing_log.append(f"Note: Could not evaluate formulas: {str(calc_error)}")
-                processing_log.append("Processing with formula detection only...")
-                
-                workbook = load_workbook(input_path)
-                
-                for sheet_name in workbook.sheetnames:
-                    sheet = workbook[sheet_name]
-                    processing_log.append(f"Processing sheet: {sheet_name}")
-                    
-                    rows_to_delete = []
-                    max_row = sheet.max_row
-                    
-                    for row_num in range(1, max_row + 1):
-                        f_val = sheet.cell(row=row_num, column=6).value
-                        g_val = sheet.cell(row=row_num, column=7).value
-                        h_val = sheet.cell(row=row_num, column=8).value
-                        i_val = sheet.cell(row=row_num, column=9).value
-                        
-                        # For formulas, treat them as non-empty unless we can evaluate them
-                        def is_empty_or_zero_with_formula(val):
-                            if val is None:
-                                return True
-                            if val == 0:
-                                return True
-                            if val == "":
-                                return True
-                            if isinstance(val, str):
-                                if val.strip() == '':
-                                    return True
-                                if val.strip() == '0':
-                                    return True
-                                # Don't treat formulas as empty
-                                if val.startswith('='):
-                                    return False
-                            return False
-                        
-                        # Check if ALL four columns are empty/zero
-                        if (is_empty_or_zero_with_formula(f_val) and 
-                            is_empty_or_zero_with_formula(g_val) and 
-                            is_empty_or_zero_with_formula(h_val) and 
-                            is_empty_or_zero_with_formula(i_val)):
-                            
-                            rows_to_delete.append(row_num)
-                            processing_log.append(f"DELETING Row {row_num}: All columns empty/zero")
-                    
-                    # Delete rows from bottom to top
-                    for row_num in reversed(rows_to_delete):
-                        sheet.delete_rows(row_num)
-                        deleted_rows += 1
-                    
-                    processing_log.append(f"Deleted {len(rows_to_delete)} rows from {sheet_name}")
-                
-                workbook.save(output_path)
-                workbook.close()
+                if rows_to_delete:
+                    rows_to_delete_by_sheet[sheet_name] = rows_to_delete
+                    total_rows_to_delete += len(rows_to_delete)
+                    processing_log.append(f"Found {len(rows_to_delete)} rows to delete in '{sheet_name}'")
+                else:
+                    processing_log.append(f"No rows to delete in '{sheet_name}'")
             
-            # Update database
-            conn.execute(
-                'UPDATE files SET processed = TRUE WHERE id = ?',
-                (file_id,)
+            wb_calc.close()
+            
+            if total_rows_to_delete == 0:
+                return jsonify({
+                    'message': 'No rows found for deletion',
+                    'total_rows_to_delete': 0,
+                    'processing_log': processing_log + ["Analysis complete - no changes needed"]
+                }), 200
+            
+            # Generate LibreOffice Calc macro
+            macro_content = generate_libreoffice_macro(
+                file_dict['original_filename'], 
+                rows_to_delete_by_sheet
             )
             
-            # Record the processed file
-            processed_file_id = conn.execute(
-                '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed) 
-                   VALUES (?, ?, ?, ?, ?)''',
-                (file_info['user_id'], output_filename, output_stored_filename, 
-                 os.path.getsize(output_path), True)
+            # Save macro file (keep in uploads folder for now)
+            macro_filename = f"macro_{uuid.uuid4().hex[:8]}.bas"
+            macro_path = os.path.join(app.config['MACROS_FOLDER'], macro_filename)
+            
+            with open(macro_path, 'w', encoding='utf-8') as f:
+                f.write(macro_content)
+            
+            # Generate instruction guide
+            instructions = generate_instructions(
+                file_dict['original_filename'],
+                total_rows_to_delete,
+                list(rows_to_delete_by_sheet.keys())
+            )
+            
+            instructions_filename = f"instructions_{uuid.uuid4().hex[:8]}.txt"
+            instructions_path = os.path.join(app.config['MACROS_FOLDER'], instructions_filename)
+            
+            with open(instructions_path, 'w', encoding='utf-8') as f:
+                f.write(instructions)
+            
+            # Record in database
+            macro_file_id = conn.execute(
+                '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type) 
+                   VALUES (?, ?, ?, ?, ?, ?)''',
+                (file_dict['user_id'], f"Macro_{file_dict['original_filename']}.bas", 
+                 macro_filename, os.path.getsize(macro_path), True, 'macro')
             ).lastrowid
             
+            instructions_file_id = conn.execute(
+                '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type) 
+                   VALUES (?, ?, ?, ?, ?, ?)''',
+                (file_dict['user_id'], f"Instructions_{file_dict['original_filename']}.txt", 
+                 instructions_filename, os.path.getsize(instructions_path), True, 'instructions')
+            ).lastrowid
+            
+            # Mark original file as analyzed
+            conn.execute('UPDATE files SET processed = TRUE WHERE id = ?', (file_id,))
             conn.commit()
             conn.close()
             
+            processing_log.append("Analysis complete - macro and instructions generated")
+            
             return jsonify({
-                'message': 'File processed successfully',
-                'original_file_id': file_id,
-                'processed_file_id': processed_file_id,
-                'deleted_rows': deleted_rows,
+                'message': 'Analysis complete',
+                'total_rows_to_delete': total_rows_to_delete,
+                'sheets_affected': list(rows_to_delete_by_sheet.keys()),
                 'processing_log': processing_log,
-                'download_filename': output_filename
+                'downloads': {
+                    'macro': {
+                        'file_id': macro_file_id,
+                        'filename': f"Macro_{file_dict['original_filename']}.bas"
+                    },
+                    'instructions': {
+                        'file_id': instructions_file_id,
+                        'filename': f"Instructions_{file_dict['original_filename']}.txt"
+                    }
+                }
             }), 200
             
         except Exception as processing_error:
+            processing_log.append(f"Analysis error: {str(processing_error)}")
             return jsonify({
-                'error': f'Processing failed: {str(processing_error)}'
+                'error': f'Analysis failed: {str(processing_error)}',
+                'processing_log': processing_log
             }), 500
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Download processed file endpoint
+def generate_libreoffice_macro(original_filename, rows_to_delete_by_sheet):
+    """Generate LibreOffice Calc macro to delete specified rows without confirmations"""
+    
+    macro_header = f'''REM Macro generated to clean up: {original_filename}
+REM This macro will delete rows where columns F, G, H, and I are all empty or zero
+REM Generated on: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC
+
+Sub DeleteEmptyRows()
+    Dim oDoc As Object
+    Dim oSheet As Object
+    Dim oController As Object
+    Dim i As Long
+    Dim rowsDeleted As Long
+    
+    ' Get the current document and controller
+    oDoc = ThisComponent
+    oController = oDoc.getCurrentController()
+    
+    ' Disable screen updating for performance (LibreOffice syntax)
+    oController.getFrame().getContainerWindow().setEnable(False)
+    
+    ' Show initial message
+    Print "Starting row deletion process..."
+    Print "Processing {len(rows_to_delete_by_sheet)} sheet(s)..."
+    
+    rowsDeleted = 0
+'''
+
+    macro_body = ""
+    for sheet_name, rows in rows_to_delete_by_sheet.items():
+        # Sort rows in descending order for deletion (delete from bottom up)
+        sorted_rows = sorted(rows, reverse=True)
+        
+        macro_body += f'''
+    ' Process sheet: {sheet_name}
+    Print "Processing sheet: {sheet_name} ({len(rows)} rows to delete)"
+    
+    ' Get sheet by name
+    If oDoc.Sheets.hasByName("{sheet_name}") Then
+        oSheet = oDoc.Sheets.getByName("{sheet_name}")
+        
+        ' Delete rows from bottom to top to maintain row numbers
+'''
+        
+        # Group consecutive rows for efficient deletion
+        row_groups = []
+        if sorted_rows:
+            current_group = [sorted_rows[0]]
+            
+            for row in sorted_rows[1:]:
+                if row == current_group[-1] - 1:  # Consecutive row
+                    current_group.append(row)
+                else:
+                    row_groups.append(current_group)
+                    current_group = [row]
+            row_groups.append(current_group)
+        
+        for group in row_groups:
+            start_row = min(group)
+            end_row = max(group)
+            count = len(group)
+            
+            macro_body += f'''        
+        ' Delete rows {start_row} to {end_row} ({count} row{"s" if count > 1 else ""})
+        oSheet.Rows.removeByIndex({start_row - 1}, {count})
+        rowsDeleted = rowsDeleted + {count}
+        Print "  ✓ Deleted {count} row{"s" if count > 1 else ""} starting at row {start_row}"
+'''
+        
+        macro_body += f'''        
+        Print "  → Completed sheet '{sheet_name}'"
+    Else
+        Print "  ⚠ Warning: Sheet '{sheet_name}' not found"
+    End If
+'''
+
+    macro_footer = '''
+    ' Re-enable screen updates
+    oController.getFrame().getContainerWindow().setEnable(True)
+    
+    ' Show completion message
+    Print "Process completed successfully!"
+    Print "Total rows deleted: " & rowsDeleted
+    
+    ' Final completion dialog
+    MsgBox "Row deletion completed!" & Chr(10) & Chr(10) & _
+           "✓ Total rows deleted: " & rowsDeleted & Chr(10) & _
+           "✓ All images and formatting preserved" & Chr(10) & Chr(10) & _
+           "Please save your file now (Ctrl+S).", _
+           64, "Process Complete"
+    
+End Sub
+
+REM Silent version without dialogs:
+Sub DeleteEmptyRowsSilent()
+    Dim oDoc As Object
+    Dim oSheet As Object
+    Dim oController As Object
+    Dim rowsDeleted As Long
+    
+    ' Get document and disable screen updates
+    oDoc = ThisComponent
+    oController = oDoc.getCurrentController()
+    oController.getFrame().getContainerWindow().setEnable(False)
+    
+    rowsDeleted = 0
+''' + macro_body.replace('Print ', 'REM ') + '''
+    ' Re-enable screen
+    oController.getFrame().getContainerWindow().setEnable(True)
+    
+    ' Just print to console - no dialog
+    Print "Silent deletion completed. Rows deleted: " & rowsDeleted
+    
+End Sub
+
+REM INSTRUCTIONS FOR USE:
+REM 
+REM Option 1 - With completion dialog (recommended):
+REM   1. Run "DeleteEmptyRows"
+REM   2. Watch progress in console (View -> Basic IDE if not visible)
+REM   3. One final confirmation when complete
+REM
+REM Option 2 - Completely silent:
+REM   1. Run "DeleteEmptyRowsSilent" 
+REM   2. No dialogs, just console output
+REM
+REM To run this macro:
+REM 1. Open your Excel file in LibreOffice Calc
+REM 2. Tools -> Macros -> Organize Macros -> LibreOffice Basic
+REM 3. Click "New" to create a new module
+REM 4. Replace the default code with this entire macro
+REM 5. Click the "Run" button or press F5
+REM 6. Choose DeleteEmptyRows or DeleteEmptyRowsSilent
+REM 7. Save your file when complete (File -> Save or Ctrl+S)
+'''
+
+    return macro_header + macro_body + macro_footer
+def generate_instructions(original_filename, total_rows, sheet_names):
+    """Generate step-by-step instructions for using the macro"""
+    
+    return f"""EXCEL FILE CLEANUP INSTRUCTIONS
+Generated for: {original_filename}
+Generated on: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC
+
+=== SUMMARY ===
+Analysis found {total_rows} rows to be deleted across {len(sheet_names)} sheet(s):
+{chr(10).join(f"• {sheet}" for sheet in sheet_names)}
+
+These rows have empty or zero values in columns F, G, H, and I.
+
+=== METHOD 1: LIBREOFFICE CALC MACRO (RECOMMENDED) ===
+
+1. BACKUP YOUR FILE FIRST!
+   - Make a copy of your original Excel file before proceeding
+
+2. Download the macro file:
+   - Click "Download Macro" button in the web interface
+   - Save the .bas file to your computer
+
+3. Open your Excel file in LibreOffice Calc:
+   - Download LibreOffice (free) if you don't have it: https://www.libreoffice.org/download/
+   - Open your Excel file in LibreOffice Calc
+
+4. Import and run the macro:
+   - Go to Tools → Macros → Organize Macros → LibreOffice Basic
+   - Click "New" to create a new module
+   - Delete the default code and paste the macro content
+   - Click "Run" (or press F5)
+   - The macro will show progress and completion message
+
+5. Save your file:
+   - File → Save (keeps Excel format)
+   - Or File → Save As to choose a different name/format
+
+=== METHOD 2: MANUAL DELETION ===
+
+If you prefer to delete rows manually, here's what to look for:
+- Find rows where columns F, G, H, and I are ALL empty or contain only zeros
+- Delete these entire rows
+- Work from bottom to top to avoid row number changes
+
+Sheet-by-sheet breakdown:
+{chr(10).join(f"• {sheet}: rows to review and potentially delete" for sheet in sheet_names)}
+
+=== IMPORTANT NOTES ===
+- This process will preserve all images, charts, and formatting
+- The macro deletes entire rows, not just cell contents
+- Always backup your file before making changes
+- If you encounter issues, you can restore from your backup
+
+=== SUPPORT ===
+If you need help or encounter issues:
+1. Make sure you have LibreOffice Calc installed
+2. Check that macros are enabled in LibreOffice
+3. Ensure you're pasting the complete macro code
+4. Try the manual method if the macro doesn't work
+
+Generated by Excel Processor Tool
+"""
+
+# Update download endpoint to handle different file types
 @app.route('/api/download/<int:file_id>', methods=['GET'])
 @jwt_required()
 def download_file(file_id):
@@ -493,18 +727,135 @@ def download_file(file_id):
         
         if not file_info:
             return jsonify({'error': 'File not found'}), 404
-            
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], file_info['stored_filename'])
+        
+        # Get correct file path based on type
+        file_dict = dict(file_info)
+        file_path = get_file_path(
+            file_dict.get('file_type'),
+            file_dict['stored_filename']
+        )
         
         if not os.path.exists(file_path):
             return jsonify({'error': 'File not found on disk'}), 404
+        
+        # Determine MIME type based on file extension
+        original_filename = file_info['original_filename']
+        if original_filename.endswith('.bas'):
+            mimetype = 'text/plain'
+        elif original_filename.endswith('.txt'):
+            mimetype = 'text/plain'
+        elif original_filename.endswith(('.xlsx', '.xls')):
+            mimetype = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        else:
+            mimetype = 'application/octet-stream'
             
         return send_file(
             file_path,
             as_attachment=True,
-            download_name=file_info['original_filename'],
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            download_name=original_filename,
+            mimetype=mimetype
         )
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Add file cleanup and sync endpoints
+@app.route('/api/cleanup-files', methods=['POST'])
+@jwt_required()
+def cleanup_files():
+    """Remove database entries for files that no longer exist on disk"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        conn = get_db()
+        user = conn.execute(
+            'SELECT id FROM users WHERE email = ?', (current_user_email,)
+        ).fetchone()
+        
+        files = conn.execute(
+            'SELECT id, stored_filename, file_type FROM files WHERE user_id = ?', 
+            (user['id'],)
+        ).fetchall()
+        
+        removed_count = 0
+        for file in files:
+            file_dict = dict(file)  # Convert sqlite3.Row to dict
+            
+            # Get the correct file path
+            file_type = file_dict.get('file_type') or 'original'
+            stored_filename = file_dict.get('stored_filename', '')
+            
+            if file_type == 'original':
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
+            elif file_type == 'processed':
+                file_path = os.path.join(app.config.get('PROCESSED_FOLDER', 'uploads'), stored_filename)
+            elif file_type in ['macro', 'instructions']:
+                file_path = os.path.join(app.config.get('MACROS_FOLDER', 'uploads'), stored_filename)
+            else:
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
+            
+            if not os.path.exists(file_path):
+                print(f"DEBUG: Removing missing file from DB: {stored_filename}")
+                conn.execute('DELETE FROM files WHERE id = ?', (file_dict['id'],))
+                removed_count += 1
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            'message': f'Cleaned up {removed_count} missing files',
+            'removed_count': removed_count
+        }), 200
+        
+    except Exception as e:
+        print(f"DEBUG: cleanup_files error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+# Add admin endpoint to see file organization
+@app.route('/api/debug/storage', methods=['GET'])
+@jwt_required()
+def debug_storage():
+    """Debug endpoint to see file organization"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        # Get storage info
+        storage_info = {
+            'uploads': [],
+            'processed': [],
+            'macros': []
+        }
+        
+        # List files in each directory
+        if os.path.exists(app.config['UPLOAD_FOLDER']):
+            storage_info['uploads'] = os.listdir(app.config['UPLOAD_FOLDER'])
+        
+        if os.path.exists(app.config['PROCESSED_FOLDER']):
+            storage_info['processed'] = os.listdir(app.config['PROCESSED_FOLDER'])
+            
+        if os.path.exists(app.config['MACROS_FOLDER']):
+            storage_info['macros'] = os.listdir(app.config['MACROS_FOLDER'])
+        
+        # Get database info
+        conn = get_db()
+        user = conn.execute(
+            'SELECT id FROM users WHERE email = ?', (current_user_email,)
+        ).fetchone()
+        
+        db_files = conn.execute(
+            '''SELECT id, original_filename, stored_filename, file_type, processed
+               FROM files WHERE user_id = ?
+               ORDER BY upload_date DESC''',
+            (user['id'],)
+        ).fetchall()
+        
+        conn.close()
+        
+        return jsonify({
+            'user': current_user_email,
+            'storage_folders': storage_info,
+            'database_files': [dict(f) for f in db_files]
+        }), 200
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
