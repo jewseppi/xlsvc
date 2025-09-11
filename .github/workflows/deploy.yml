@@ -1,4 +1,4 @@
-name: Deploy XLSVC to excel.processor.jsilverman.ca
+name: Deploy XLSVC Flask Backend
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.HOST }} >> ~/.ssh/known_hosts
 
-      - name: Deploy Flask Backend
+      - name: Backup existing files
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.HOST }}
@@ -29,39 +29,27 @@ jobs:
           script: |
             set -euo pipefail
 
-            # Create backup of working files first
             cd ~/public_html/xlsvc
-            mkdir -p backup_$(date +%Y%m%d_%H%M%S)
-            cp *.py requirements.txt .htaccess passenger_wsgi.py backup_$(date +%Y%m%d_%H%M%S)/ 2>/dev/null || echo "No files to backup"
 
-            echo "Backup created, proceeding with deployment"
+            # Create backup directory with timestamp
+            backup_dir="backup_$(date +%Y%m%d_%H%M%S)"
+            mkdir -p "$backup_dir"
 
-      - name: Upload Backend Files via SSH
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            set -euo pipefail
+            # Backup Python files, requirements, and config files
+            cp *.py requirements.txt .htaccess passenger_wsgi.py "$backup_dir/" 2>/dev/null || echo "Some files not found for backup"
 
-            # Create temp directory for uploads
-            mkdir -p ~/temp_xlsvc_deploy
-            cd ~/temp_xlsvc_deploy
+            echo "Backup created in $backup_dir"
 
-            # Clean up any previous temp files
-            rm -f *.py requirements.txt 2>/dev/null || true
-
-      - name: Transfer Files with rsync
+      - name: Upload Flask Backend Files
         run: |
-          # Use rsync instead of SCP action - more reliable
+          # Use rsync to upload Python files
           rsync -avz -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no" \
             --include="*.py" \
             --include="requirements.txt" \
             --exclude="*" \
-            ./ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:~/temp_xlsvc_deploy/
+            ./ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:~/public_html/xlsvc/
 
-      - name: Install Dependencies and Setup Backend
+      - name: Install Dependencies and Setup
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.HOST }}
@@ -70,11 +58,6 @@ jobs:
           script: |
             set -euo pipefail
 
-            # Move files from temp to production
-            cd ~/temp_xlsvc_deploy
-            cp *.py requirements.txt ~/public_html/xlsvc/
-
-            # Navigate to production directory
             cd ~/public_html/xlsvc
 
             # Activate virtual environment
@@ -84,7 +67,7 @@ jobs:
             pip install --upgrade pip
             pip install -r requirements.txt
 
-            # Create passenger_wsgi.py
+            # Create/update passenger_wsgi.py
             cat > passenger_wsgi.py << 'WSGI_EOF'
             import os
             import sys
@@ -92,125 +75,44 @@ jobs:
             from main import app as application
             WSGI_EOF
 
-            # Create uploads directory
+            # Create directories
             mkdir -p uploads tmp
             chmod 755 uploads
 
             # Initialize database if it doesn't exist
             if [ ! -f xlsvc.db ]; then
-              python -c "from main import init_db; init_db()" || echo "Database init skipped"
+              python -c "from main import init_db; init_db()" || echo "Database init skipped - no init_db function"
             fi
 
-            # Create .htaccess
+            # Create/update .htaccess
             cat > .htaccess << 'HTACCESS_EOF'
-            RewriteEngine On
+            RewriteEngine Off
+            Options -MultiViews
             PassengerEnabled on
             PassengerAppRoot /home/glqltckdiqd1/public_html/xlsvc
             PassengerAppType wsgi
             PassengerStartupFile passenger_wsgi.py
+            PassengerBaseURI /
             PassengerPython /home/glqltckdiqd1/virtualenv/public_html/xlsvc/3.11/bin/python
-
-            # Handle CORS preflight
-            RewriteCond %{REQUEST_METHOD} OPTIONS
-            RewriteRule ^(.*)$ $1 [R=200,L]
-
-            # Handle API requests
-            RewriteCond %{REQUEST_URI} ^/api/
-            RewriteRule ^api/(.*)$ passenger_wsgi.py/$1 [QSA,L]
-
-            # Handle React Router for frontend
-            RewriteCond %{REQUEST_FILENAME} !-f
-            RewriteCond %{REQUEST_FILENAME} !-d
-            RewriteCond %{REQUEST_URI} !^/api/
-            RewriteRule . index.html [L]
+            ErrorDocument 404 "Not Found"
+            ErrorDocument 500 "Server Error"
             HTACCESS_EOF
 
             # Set permissions
             chmod 644 *.py requirements.txt .htaccess passenger_wsgi.py 2>/dev/null || true
             chmod 755 uploads
-
-            # Clean up temp directory
-            rm -rf ~/temp_xlsvc_deploy
-
-            echo "Backend deployment complete!"
-
-      - name: Build React Frontend
-        run: |
-          # Update API base URL for subdomain
-          sed -i 's|http://127.0.0.1:5000/api|https://excel.processor.jsilverman.ca/api|g' src/App.jsx
-
-          # Install and build
-          npm ci
-          npm run build
-
-      - name: Deploy Frontend via rsync
-        run: |
-          # Deploy React build files
-          rsync -avz -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no" \
-            --delete-after \
-            --exclude="*.py" \
-            --exclude="requirements.txt" \
-            --exclude="passenger_wsgi.py" \
-            --exclude=".htaccess" \
-            --exclude="xlsvc.db" \
-            --exclude="uploads/" \
-            --exclude="__pycache__/" \
-            --exclude="tmp/" \
-            --exclude="backup_*/" \
-            dist/ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:~/public_html/xlsvc/
-
-      - name: Final Setup and Restart
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            set -euo pipefail
-
-            cd ~/public_html/xlsvc
-
-            # Update .htaccess to handle both frontend and backend
-            cat > .htaccess << 'FINAL_HTACCESS'
-            RewriteEngine On
-            PassengerEnabled on
-            PassengerAppRoot /home/glqltckdiqd1/public_html/xlsvc
-            PassengerAppType wsgi
-            PassengerStartupFile passenger_wsgi.py
-            PassengerPython /home/glqltckdiqd1/virtualenv/public_html/xlsvc/3.11/bin/python
-
-            # Handle CORS preflight
-            RewriteCond %{REQUEST_METHOD} OPTIONS
-            RewriteRule ^(.*)$ $1 [R=200,L]
-
-            # Handle API requests
-            RewriteCond %{REQUEST_URI} ^/api/
-            RewriteRule ^api/(.*)$ passenger_wsgi.py/$1 [QSA,L]
-
-            # Handle React Router - serve static files first, then index.html
-            RewriteCond %{REQUEST_FILENAME} !-f
-            RewriteCond %{REQUEST_FILENAME} !-d
-            RewriteCond %{REQUEST_URI} !^/api/
-            RewriteRule . index.html [L]
-            FINAL_HTACCESS
-
-            # Set final permissions
-            find . -type f -exec chmod 644 {} \; 2>/dev/null || true
-            find . -type d -exec chmod 755 {} \; 2>/dev/null || true
-            chmod 755 uploads 2>/dev/null || true
+            chmod 644 xlsvc.db 2>/dev/null || true
 
             # Restart Passenger
-            mkdir -p tmp
             touch tmp/restart.txt
 
-            echo "Full deployment complete!"
+            echo "Flask backend deployment complete!"
 
       - name: Verify Deployment
         run: |
-          echo "XLSVC Deployment complete!"
-          echo "App: https://excel.processor.jsilverman.ca"
-          echo "API Health: https://excel.processor.jsilverman.ca/api/health"
+          echo "Flask Backend Deployment Complete!"
+          echo "API: https://excel.processor.jsilverman.ca/api/health"
           echo ""
           echo "Testing API endpoint..."
-          sleep 10
-          curl -f https://excel.processor.jsilverman.ca/api/health || echo "API not responding yet - may need a few more seconds"
+          sleep 15
+          curl -f https://excel.processor.jsilverman.ca/api/health || echo "API not responding yet - check logs"
