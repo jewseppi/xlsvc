@@ -29,7 +29,7 @@ jobs:
           script: |
             set -euo pipefail
 
-            cd ~/public_html/api/xlsvc
+            cd ${{ secrets.DEPLOY_PATH }}/api/xlsvc
 
             # Create backup directory with timestamp
             backup_dir="backup_$(date +%Y%m%d_%H%M%S)"
@@ -47,7 +47,7 @@ jobs:
             --include="*.py" \
             --include="requirements.txt" \
             --exclude="*" \
-            ./ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:~/public_html/api/xlsvc/
+            ./ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:${{ secrets.DEPLOY_PATH }}/api/xlsvc/
 
       - name: Install Dependencies and Setup
         uses: appleboy/ssh-action@v1.0.0
@@ -58,10 +58,10 @@ jobs:
           script: |
             set -euo pipefail
 
-            cd ~/public_html/api/xlsvc
+            cd ${{ secrets.DEPLOY_PATH }}/api/xlsvc
 
             # Activate virtual environment
-            source ~/virtualenv/public_html/api/xlsvc/3.11/bin/activate
+            source ${{ secrets.PASSENGER_PYTHON_PATH }}/bin/activate
 
             # Update pip and install dependencies
             pip install --upgrade pip
@@ -89,11 +89,11 @@ jobs:
             RewriteEngine Off
             Options -MultiViews
             PassengerEnabled on
-            PassengerAppRoot /home/glqltckdiqd1/public_html/api/xlsvc
+            PassengerAppRoot ${{ secrets.PASSENGER_APP_ROOT }}
             PassengerAppType wsgi
             PassengerStartupFile passenger_wsgi.py
             PassengerBaseURI /
-            PassengerPython /home/glqltckdiqd1/virtualenv/public_html/api/xlsvc/3.11/bin/python
+            PassengerPython ${{ secrets.PASSENGER_PYTHON_PATH }}
             ErrorDocument 404 "Not Found"
             ErrorDocument 500 "Server Error"
             HTACCESS_EOF
@@ -111,8 +111,8 @@ jobs:
       - name: Verify Deployment
         run: |
           echo "Flask Backend Deployment Complete!"
-          echo "API: https://excel.processor.jsilverman.ca/api/health"
+          echo "API: https://api.xlsvc.jsilverman.ca/api/health"
           echo ""
           echo "Testing API endpoint..."
           sleep 15
-          curl -f https://excel.processor.jsilverman.ca/api/health || echo "API not responding yet - check logs"
+          curl -f https://api.xlsvc.jsilverman.ca/api/health || echo "API not responding yet - check logs"
