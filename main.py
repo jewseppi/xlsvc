@@ -16,7 +16,7 @@ import json
 app = Flask(__name__)
 
 # Configuration
-app.config['JWT_SECRET_KEY'] = 'your-secret-key-change-this'  # Change this!
+app.config['JWT_SECRET_KEY'] = os.environ.get('SECRET_KEY')
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['PROCESSED_FOLDER'] = 'processed'
