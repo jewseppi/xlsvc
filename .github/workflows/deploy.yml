@@ -29,7 +29,7 @@ jobs:
           script: |
             set -euo pipefail
 
-            cd ~/public_html/xlsvc
+            cd ~/public_html/api/xlsvc
 
             # Create backup directory with timestamp
             backup_dir="backup_$(date +%Y%m%d_%H%M%S)"
@@ -47,7 +47,7 @@ jobs:
             --include="*.py" \
             --include="requirements.txt" \
             --exclude="*" \
-            ./ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:~/public_html/xlsvc/
+            ./ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:~/public_html/api/xlsvc/
 
       - name: Install Dependencies and Setup
         uses: appleboy/ssh-action@v1.0.0
@@ -58,10 +58,10 @@ jobs:
           script: |
             set -euo pipefail
 
-            cd ~/public_html/xlsvc
+            cd ~/public_html/api/xlsvc
 
             # Activate virtual environment
-            source ~/virtualenv/public_html/xlsvc/3.11/bin/activate
+            source ~/virtualenv/public_html/api/xlsvc/3.11/bin/activate
 
             # Update pip and install dependencies
             pip install --upgrade pip
@@ -89,11 +89,11 @@ jobs:
             RewriteEngine Off
             Options -MultiViews
             PassengerEnabled on
-            PassengerAppRoot /home/glqltckdiqd1/public_html/xlsvc
+            PassengerAppRoot /home/glqltckdiqd1/public_html/api/xlsvc
             PassengerAppType wsgi
             PassengerStartupFile passenger_wsgi.py
             PassengerBaseURI /
-            PassengerPython /home/glqltckdiqd1/virtualenv/public_html/xlsvc/3.11/bin/python
+            PassengerPython /home/glqltckdiqd1/virtualenv/public_html/api/xlsvc/3.11/bin/python
             ErrorDocument 404 "Not Found"
             ErrorDocument 500 "Server Error"
             HTACCESS_EOF

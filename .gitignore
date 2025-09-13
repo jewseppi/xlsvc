@@ -5,9 +5,9 @@ xlsvc.db
 .DS_Store
 
 uploads/
-venv/__pycache__/
-*.pyc
-uploads/
-processed/
+processed/ 
 macros/
+*.pyc
+__pycache__/
 *.db
+venv/
