@@ -93,7 +93,7 @@ jobs:
             PassengerAppType wsgi
             PassengerStartupFile passenger_wsgi.py
             PassengerBaseURI /
-            PassengerPython ${{ secrets.PASSENGER_PYTHON_PATH }}
+            PassengerPython ${{ secrets.PASSENGER_PYTHON_PATH }}/bin/python
             ErrorDocument 404 "Not Found"
             ErrorDocument 500 "Server Error"
             HTACCESS_EOF
