@@ -178,6 +178,8 @@ def is_empty_or_zero(val):
 # Authentication endpoints
 @app.route('/api/register', methods=['POST'])
 def register():
+    return jsonify({'error': 'Registration is currently disabled'}), 403
+
     try:
         data = request.get_json()
         email = data.get('email')
