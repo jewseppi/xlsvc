@@ -896,25 +896,30 @@ class GitHubAppAuth:
         }
         return jwt_lib.encode(payload, self.private_key, algorithm='RS256')
     
-    def get_installation_token(self):
-        """Get installation access token"""
-        app_token = self.get_app_token()
-        
-        headers = {
-            'Authorization': f'Bearer {app_token}',
-            'Accept': 'application/vnd.github.v3+json'
-        }
-        
-        response = requests.post(
-            f'https://api.github.com/app/installations/{self.installation_id}/access_tokens',
-            headers=headers
-        )
-        
-        if response.status_code == 201:
-            return response.json()['token']
-        else:
-            raise Exception(f"Failed to get installation token: {response.status_code} {response.text}")
-
+def get_installation_token(self):
+    """Get installation access token"""
+    app_token = self.get_app_token()
+    
+    headers = {
+        'Authorization': f'Bearer {app_token}',
+        'Accept': 'application/vnd.github.v3+json'
+    }
+    
+    print(f"DEBUG: Requesting token for installation {self.installation_id}")
+    
+    response = requests.post(
+        f'https://api.github.com/app/installations/{self.installation_id}/access_tokens',
+        headers=headers
+    )
+    
+    print(f"DEBUG: Installation token response: {response.status_code}")
+    print(f"DEBUG: Response body: {response.text}")
+    
+    if response.status_code == 201:
+        return response.json()['token']
+    else:
+        raise Exception(f"Failed to get installation token: {response.status_code} {response.text}")
+    
 @app.route('/api/process-automated/<int:file_id>', methods=['POST'])
 @jwt_required()
 def process_file_automated(file_id):
