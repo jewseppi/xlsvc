@@ -69,18 +69,20 @@ jobs:
           import os
           import time
           import shutil
+          import sys
 
-          # Copy input file to output file
-          shutil.copy2('input.xlsx', 'output.xlsx')
-          print("Copied input.xlsx to output.xlsx")
+          def main():
+              # Copy input file to output file
+              shutil.copy2('input.xlsx', 'output.xlsx')
+              print("Copied input.xlsx to output.xlsx")
 
-          # Read the macro content
-          with open('process_macro.bas', 'r', encoding='utf-8') as f:
-              macro_content = f.read()
+              # Read the macro content
+              with open('process_macro.bas', 'r', encoding='utf-8') as f:
+                  macro_content = f.read()
 
-          # Create a LibreOffice Basic script that can be executed
-          # We'll create a temporary macro file that LibreOffice can execute
-          script_content = f'''
+              # Create a LibreOffice Basic script that can be executed
+              # We'll create a temporary macro file that LibreOffice can execute
+              script_content = f'''
           REM Temporary script to execute the processing macro
 
           {macro_content}
@@ -91,67 +93,75 @@ jobs:
           End Sub
           '''
 
-          # Save the complete script
-          with open('temp_script.bas', 'w', encoding='utf-8') as f:
-              f.write(script_content)
+              # Save the complete script
+              with open('temp_script.bas', 'w', encoding='utf-8') as f:
+                  f.write(script_content)
 
-          print("Created LibreOffice script")
+              print("Created LibreOffice script")
 
-          # Try to execute LibreOffice with the macro
-          # First, try a simple approach - just open and save with LibreOffice
-          # This will at least verify the file can be processed
+              # Try to execute LibreOffice with the macro
+              # First, try a simple approach - just open and save with LibreOffice
+              # This will at least verify the file can be processed
 
-          print("Running LibreOffice to process the file...")
+              print("Running LibreOffice to process the file...")
 
-          try:
-              # Start Xvfb for headless display
-              xvfb_proc = subprocess.Popen(['Xvfb', ':99', '-screen', '0', '1024x768x24'])
-              time.sleep(2)
-              
-              # Set display environment
-              env = os.environ.copy()
-              env['DISPLAY'] = ':99'
-              
-              # Run LibreOffice to open, process, and save the file
-              cmd = [
-                  'libreoffice', '--headless', '--calc',
-                  '--convert-to', 'xlsx',
-                  '--outdir', '.',
-                  'output.xlsx'
-              ]
-              
-              result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
-              
-              print(f"LibreOffice result: {result.returncode}")
-              print(f"Output: {result.stdout}")
-              if result.stderr:
-                  print(f"Errors: {result.stderr}")
-              
-              # Clean up Xvfb
-              xvfb_proc.terminate()
-              
-              # Check if output file exists and has reasonable size
-              if os.path.exists('output.xlsx'):
-                  size = os.path.getsize('output.xlsx')
-                  print(f"Output file size: {size} bytes")
-                  if size > 1000:  # At least 1KB
-                      print("Processing appears successful")
-                      return True
-              
-              print("Processing may have failed - file too small or missing")
-              return False
-              
-          except subprocess.TimeoutExpired:
-              print("LibreOffice processing timed out")
-              if 'xvfb_proc' in locals():
+              try:
+                  # Start Xvfb for headless display
+                  xvfb_proc = subprocess.Popen(['Xvfb', ':99', '-screen', '0', '1024x768x24'])
+                  time.sleep(2)
+                  
+                  # Set display environment
+                  env = os.environ.copy()
+                  env['DISPLAY'] = ':99'
+                  
+                  # Run LibreOffice to open, process, and save the file
+                  cmd = [
+                      'libreoffice', '--headless', '--calc',
+                      '--convert-to', 'xlsx',
+                      '--outdir', '.',
+                      'output.xlsx'
+                  ]
+                  
+                  result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
+                  
+                  print(f"LibreOffice result: {result.returncode}")
+                  print(f"Output: {result.stdout}")
+                  if result.stderr:
+                      print(f"Errors: {result.stderr}")
+                  
+                  # Clean up Xvfb
                   xvfb_proc.terminate()
-              return False
-          except Exception as e:
-              print(f"Error running LibreOffice: {e}")
-              if 'xvfb_proc' in locals():
-                  xvfb_proc.terminate()
-              return False
+                  
+                  # Check if output file exists and has reasonable size
+                  if os.path.exists('output.xlsx'):
+                      size = os.path.getsize('output.xlsx')
+                      print(f"Output file size: {size} bytes")
+                      if size > 1000:  # At least 1KB
+                          print("Processing appears successful")
+                          return True
+                  
+                  print("Processing may have failed - file too small or missing")
+                  return False
+                  
+              except subprocess.TimeoutExpired:
+                  print("LibreOffice processing timed out")
+                  if 'xvfb_proc' in locals():
+                      xvfb_proc.terminate()
+                  return False
+              except Exception as e:
+                  print(f"Error running LibreOffice: {e}")
+                  if 'xvfb_proc' in locals():
+                      xvfb_proc.terminate()
+                  return False
 
+          if __name__ == "__main__":
+              success = main()
+              if success:
+                  print("Processing completed successfully")
+                  sys.exit(0)
+              else:
+                  print("Processing failed")
+                  sys.exit(1)
           EOF
 
           python process_with_libreoffice.py
