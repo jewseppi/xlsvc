@@ -11,7 +11,7 @@ from openpyxl import load_workbook
 import hashlib
 import requests
 import secrets
-import jwt
+import jwt as jwt_lib
 import time
 
 app = Flask(__name__)
@@ -894,7 +894,7 @@ class GitHubAppAuth:
             'exp': now + 600,  # 10 minutes
             'iss': self.app_id
         }
-        return jwt.encode(payload, self.private_key, algorithm='RS256')
+        return jwt_lib.encode(payload, self.private_key, algorithm='RS256')
     
     def get_installation_token(self):
         """Get installation access token"""
