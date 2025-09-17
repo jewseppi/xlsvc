@@ -216,7 +216,6 @@ jobs:
           CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
           CALLBACK_TOKEN: ${{ github.event.client_payload.callback_token }}
           FILE_ID: ${{ github.event.client_payload.file_id }}
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python process_excel.py
 
