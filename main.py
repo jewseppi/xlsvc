@@ -880,61 +880,10 @@ def debug_storage():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     
-def fix_private_key_format(raw_key):
-    """Fix private key format - return the actual formatted key, not JSON"""
-    
-    # Handle different newline representations
-    if '\\n' in raw_key:
-        key = raw_key.replace('\\n', '\n')
-    else:
-        key = raw_key
-    
-    begin_marker = '-----BEGIN RSA PRIVATE KEY-----'
-    end_marker = '-----END RSA PRIVATE KEY-----'
-    
-    # Extract just the base64 content
-    if begin_marker in key and end_marker in key:
-        start_idx = key.find(begin_marker) + len(begin_marker)
-        end_idx = key.find(end_marker)
-        content = key[start_idx:end_idx]
-        
-        # Clean the content - remove all whitespace
-        clean_content = ''.join(content.split())
-        
-        # Rebuild with proper 64-character lines
-        lines = [begin_marker]
-        for i in range(0, len(clean_content), 64):
-            lines.append(clean_content[i:i+64])
-        lines.append(end_marker)
-        
-        return '\n'.join(lines)
-    
-    return raw_key  # Return as-is if no markers found
-
 class GitHubAppAuth:
     def __init__(self):
         self.app_id = os.getenv('GITHUB_APP_ID')
-
-        # Fix the key format automatically
-        raw_key = os.getenv('GITHUB_PRIVATE_KEY', '')
-    
-        # Look at the first 200 characters to see the actual format
-        first_200 = raw_key[:200]
-        
-        # Check for different types of newline representations
-        checks = {
-            'total_length': len(raw_key),
-            'first_200_chars': first_200,
-            'contains_literal_backslash_n': '\\n' in raw_key,
-            'contains_actual_newline': '\n' in raw_key,
-            'contains_carriage_return': '\r' in raw_key,
-            'char_codes_first_100': [ord(c) for c in raw_key[:100]]
-        }
-        
-        print(jsonify(checks))
-
-        self.private_key = fix_private_key_format(raw_key)
-
+        self.private_key = os.getenv('GITHUB_PRIVATE_KEY', '').replace('\\n', '\n')
         self.installation_id = os.getenv('GITHUB_INSTALLATION_ID')
         
     def get_app_token(self):
