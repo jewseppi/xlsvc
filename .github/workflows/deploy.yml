@@ -84,6 +84,13 @@ jobs:
               python -c "from main import init_db; init_db()" || echo "Database init skipped - no init_db function"
             fi
 
+            echo "GITHUB_APP_ID=${{ secrets.APP_ID }}" > .env
+            echo "GITHUB_INSTALLATION_ID=${{ secrets.INSTALLATION_ID }}" >> .env
+            echo "GITHUB_PRIVATE_KEY=\"${{ secrets.APP_PRIVATE_KEY }}\"" >> .env
+            echo "GITHUB_REPO=${{ github.repository }}" >> .env
+            echo "BASE_URL=https://api.xlsvc.jsilverman.ca" >> .env
+            chmod 600 .env
+
             # Create/update .htaccess
             cat > .htaccess << 'HTACCESS_EOF'
             RewriteEngine Off
