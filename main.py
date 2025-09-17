@@ -880,28 +880,35 @@ def debug_storage():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     
-def fix_private_key_format(key_string):
-    """Convert single-line private key to proper multi-line format"""
-    # Handle both literal \n and actual newlines
-    key_string = key_string.replace('\\n', '\n').strip()
+def fix_private_key_format(raw_key):
+    """Fix private key format regardless of how it's stored"""
     
-    # If it's already multi-line, return as-is
-    if '\n' in key_string and '-----BEGIN RSA PRIVATE KEY-----\n' in key_string:
-        return key_string
+    # Step 1: Handle different newline representations
+    if '\\n' in raw_key:
+        # cPanel stored with literal \n
+        key = raw_key.replace('\\n', '\n')
+    else:
+        key = raw_key
     
-    # Extract just the key content (remove markers temporarily)
+    # Step 2: Extract just the base64 content
     begin_marker = '-----BEGIN RSA PRIVATE KEY-----'
     end_marker = '-----END RSA PRIVATE KEY-----'
     
-    # Remove markers and any spaces
-    content = key_string.replace(begin_marker, '').replace(end_marker, '').strip()
+    # Find the actual key content between markers
+    if begin_marker in key and end_marker in key:
+        start_idx = key.find(begin_marker) + len(begin_marker)
+        end_idx = key.find(end_marker)
+        content = key[start_idx:end_idx]
+    else:
+        return raw_key  # Return as-is if no markers found
     
-    # Split into 64-character lines
+    # Step 3: Clean the content - remove all whitespace
+    clean_content = ''.join(content.split())
+    
+    # Step 4: Rebuild with proper 64-character lines
     lines = [begin_marker]
-    for i in range(0, len(content), 64):
-        line = content[i:i+64]
-        if line.strip():  # Only add non-empty lines
-            lines.append(line)
+    for i in range(0, len(clean_content), 64):
+        lines.append(clean_content[i:i+64])
     lines.append(end_marker)
     
     return '\n'.join(lines)
