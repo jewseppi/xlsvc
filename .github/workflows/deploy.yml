@@ -84,12 +84,6 @@ jobs:
               python -c "from main import init_db; init_db()" || echo "Database init skipped - no init_db function"
             fi
 
-            # Add GitHub token for Excel processing
-            echo "GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}" > .env
-            echo "GITHUB_REPO=${{ github.repository }}" >> .env
-            echo "BASE_URL=https://api.xlsvc.jsilverman.ca" >> .env
-            chmod 600 .env
-
             # Create/update .htaccess
             cat > .htaccess << 'HTACCESS_EOF'
             RewriteEngine Off

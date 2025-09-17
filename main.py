@@ -11,10 +11,10 @@ from openpyxl import load_workbook
 import hashlib
 import requests
 import secrets
-from dotenv import load_dotenv
+import jwt
+import time
 
 app = Flask(__name__)
-load_dotenv()
 
 # Configuration
 app.config['JWT_SECRET_KEY'] = os.environ.get('SECRET_KEY')
@@ -879,23 +879,48 @@ def debug_storage():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    
+class GitHubAppAuth:
+    def __init__(self):
+        self.app_id = os.getenv('GITHUB_APP_ID')
+        self.private_key = os.getenv('GITHUB_PRIVATE_KEY', '').replace('\\n', '\n')
+        self.installation_id = os.getenv('GITHUB_INSTALLATION_ID')
+        
+    def get_app_token(self):
+        """Generate JWT token for GitHub App"""
+        now = int(time.time())
+        payload = {
+            'iat': now,
+            'exp': now + 600,  # 10 minutes
+            'iss': self.app_id
+        }
+        return jwt.encode(payload, self.private_key, algorithm='RS256')
+    
+    def get_installation_token(self):
+        """Get installation access token"""
+        app_token = self.get_app_token()
+        
+        headers = {
+            'Authorization': f'Bearer {app_token}',
+            'Accept': 'application/vnd.github.v3+json'
+        }
+        
+        response = requests.post(
+            f'https://api.github.com/app/installations/{self.installation_id}/access_tokens',
+            headers=headers
+        )
+        
+        if response.status_code == 201:
+            return response.json()['token']
+        else:
+            raise Exception(f"Failed to get installation token: {response.status_code} {response.text}")
+
 
 @app.route('/api/process-automated/<int:file_id>', methods=['POST'])
 @jwt_required()
 def process_file_automated(file_id):
-    # Debug environment variables
-    github_token = os.getenv("GITHUB_TOKEN")
-    github_repo = os.getenv("GITHUB_REPO")
-    
-    if not github_token:
-        return jsonify({'error': 'GITHUB_TOKEN not found - .env not loaded'}), 500
-    if not github_repo:
-        return jsonify({'error': 'GITHUB_REPO not found - .env not loaded'}), 500
-    
-    """Trigger GitHub Actions processing"""
+    """Trigger GitHub Actions processing using GitHub App authentication"""
     print(f"DEBUG: Starting automated processing for file {file_id}")
-    print(f"DEBUG: GITHUB_TOKEN exists: {bool(os.getenv('GITHUB_TOKEN'))}")
-    print(f"DEBUG: GITHUB_REPO: {os.getenv('GITHUB_REPO')}")
 
     try:
         current_user_email = get_jwt_identity()
@@ -928,8 +953,9 @@ def process_file_automated(file_id):
             rows_to_delete_by_sheet
         )
         
-        # Create job ID
+        # Create job ID and callback token
         job_id = secrets.token_urlsafe(16)
+        callback_token = secrets.token_urlsafe(32)
         
         # Store job in database
         conn.execute(
@@ -940,48 +966,61 @@ def process_file_automated(file_id):
         conn.commit()
         conn.close()
         
-        # Trigger GitHub Actions
+        # Get GitHub token using App authentication
+        github_auth = GitHubAppAuth()
+        github_token = github_auth.get_installation_token()
+        github_repo = os.getenv('GITHUB_REPO', 'jewseppi/xlsvc')
+        
+        # Prepare GitHub Actions payload - match your workflow expectations
+        base_url = request.host_url.rstrip('/')
         github_payload = {
             "event_type": "process-excel",
             "client_payload": {
-                "job_id": job_id,
-                "download_url": f"{request.host_url}api/download/{file_id}",
-                "callback_url": f"{request.host_url}api/processing-callback",
-                "macro_content": macro_content
+                "file_id": str(file_id),
+                "file_url": f"{base_url}/api/download/{file_id}",  # Your workflow expects 'file_url'
+                "callback_url": f"{base_url}/api/processing-callback",
+                "callback_token": callback_token
             }
         }
         
         headers = {
-            'Authorization': f'token {os.getenv("GITHUB_TOKEN")}',
+            'Authorization': f'Bearer {github_token}',  # Use Bearer with installation token
             'Accept': 'application/vnd.github.v3+json',
             'Content-Type': 'application/json'
         }
         
+        print(f"DEBUG: Dispatching to: https://api.github.com/repos/{github_repo}/dispatches")
+        
         response = requests.post(
-            f'https://api.github.com/repos/{os.getenv("GITHUB_REPO")}/dispatches',
+            f'https://api.github.com/repos/{github_repo}/dispatches',
             headers=headers,
-            json=github_payload
+            json=github_payload,
+            timeout=30
         )
+        
+        print(f"DEBUG: GitHub API response: {response.status_code}")
         
         if response.status_code == 204:
             return jsonify({
-                'message': 'Processing started',
+                'message': 'Processing started via GitHub Actions',
                 'job_id': job_id,
                 'status': 'pending',
                 'estimated_time': '2-3 minutes'
             }), 202
         else:
+            print(f"DEBUG: GitHub API error: {response.text}")
             return jsonify({
-                'error': 'Failed to start processing',
-                'details': response.text
+                'error': 'Failed to start GitHub Actions processing',
+                'details': response.text,
+                'status_code': response.status_code
             }), 500
             
     except Exception as e:
         print(f"DEBUG: Exception in process_file_automated: {str(e)}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
-
+        return jsonify({'error': str(e)}), 500
+    
 @app.route('/api/processing-callback', methods=['POST'])
 def processing_callback():
     """Receive results from GitHub Actions"""
