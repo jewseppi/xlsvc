@@ -923,6 +923,8 @@ class GitHubAppAuth:
 @app.route('/api/process-automated/<int:file_id>', methods=['POST'])
 @jwt_required()
 def process_file_automated(file_id):
+    return jsonify({'debug': 'Route reached', 'file_id': file_id}), 200  # Add this first
+
     """Trigger GitHub Actions processing using GitHub App authentication"""
     print(f"DEBUG: Starting automated processing for file {file_id}")
 
