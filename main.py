@@ -882,28 +882,29 @@ def debug_storage():
     
 def fix_private_key_format(key_string):
     """Convert single-line private key to proper multi-line format"""
-    # Remove existing newlines and extra spaces
-    key_string = key_string.replace('\\n', '').replace('\n', '').strip()
+    # Handle both literal \n and actual newlines
+    key_string = key_string.replace('\\n', '\n').strip()
     
-    # Extract the content between BEGIN and END markers
+    # If it's already multi-line, return as-is
+    if '\n' in key_string and '-----BEGIN RSA PRIVATE KEY-----\n' in key_string:
+        return key_string
+    
+    # Extract just the key content (remove markers temporarily)
     begin_marker = '-----BEGIN RSA PRIVATE KEY-----'
     end_marker = '-----END RSA PRIVATE KEY-----'
     
-    if begin_marker in key_string and end_marker in key_string:
-        # Find the actual key content
-        start = key_string.find(begin_marker) + len(begin_marker)
-        end = key_string.find(end_marker)
-        key_content = key_string[start:end].strip()
-        
-        # Break into 64-character lines
-        lines = [begin_marker]
-        for i in range(0, len(key_content), 64):
-            lines.append(key_content[i:i+64])
-        lines.append(end_marker)
-        
-        return '\n'.join(lines)
+    # Remove markers and any spaces
+    content = key_string.replace(begin_marker, '').replace(end_marker, '').strip()
     
-    return key_string
+    # Split into 64-character lines
+    lines = [begin_marker]
+    for i in range(0, len(content), 64):
+        line = content[i:i+64]
+        if line.strip():  # Only add non-empty lines
+            lines.append(line)
+    lines.append(end_marker)
+    
+    return '\n'.join(lines)
 
 class GitHubAppAuth:
     def __init__(self):
