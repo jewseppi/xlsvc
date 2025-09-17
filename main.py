@@ -11,9 +11,10 @@ from openpyxl import load_workbook
 import hashlib
 import requests
 import secrets
-import json
+from dotenv import load_dotenv
 
 app = Flask(__name__)
+load_dotenv()
 
 # Configuration
 app.config['JWT_SECRET_KEY'] = os.environ.get('SECRET_KEY')

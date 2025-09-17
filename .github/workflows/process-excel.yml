@@ -5,118 +5,225 @@ on:
     types: [process-excel]
 
 jobs:
-  process:
+  process-excel:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install LibreOffice
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libreoffice-calc
+          sudo apt-get install -y libreoffice
+          pip install requests openpyxl pandas
 
-      - name: Download input file
+      - name: Download Excel file
         run: |
-          echo "Downloading file from: ${{ github.event.client_payload.download_url }}"
-          curl -H "Authorization: Bearer ${{ secrets.API_TOKEN }}" \
-               -o input.xlsx \
-               "${{ github.event.client_payload.download_url }}"
+          echo "Downloading file from: ${{ github.event.client_payload.file_url }}"
+          curl -L -o input.xlsx "${{ github.event.client_payload.file_url }}"
+          ls -la input.xlsx
 
-      - name: Create macro file
+      - name: Create Excel processing script
         run: |
-          cat > macro.bas << 'EOF'
-          ${{ github.event.client_payload.macro_content }}
-          EOF
-
-      - name: Process file with LibreOffice
-        run: |
-          # Copy macro to LibreOffice user directory
-          mkdir -p ~/.config/libreoffice/4/user/basic/Standard
-          cp macro.bas ~/.config/libreoffice/4/user/basic/Standard/Module1.bas
-
-          # Create Basic script runner
-          cat > run_macro.py << 'EOF'
-          import uno
-          import sys
+          cat > process_excel.py << 'EOF'
           import os
-          from com.sun.star.beans import PropertyValue
+          import json
+          import requests
+          import subprocess
+          import tempfile
+          import shutil
+          from pathlib import Path
+          import time
+          from openpyxl import load_workbook
 
-          def run_macro():
-              # Connect to LibreOffice
-              localContext = uno.getComponentContext()
-              resolver = localContext.ServiceManager.createInstanceWithContext(
-                  "com.sun.star.bridge.UnoUrlResolver", localContext)
-              
+          def process_excel_with_openpyxl(input_file, output_file):
+              """Process Excel file using openpyxl to remove empty rows"""
               try:
-                  context = resolver.resolve("uno:socket,host=localhost,port=2002;urp;StarOffice.ComponentContext")
-              except:
-                  # Start LibreOffice in headless mode
-                  os.system('libreoffice --headless --accept="socket,host=127.0.0.1,port=2002;urp;" &')
-                  import time
-                  time.sleep(3)
-                  context = resolver.resolve("uno:socket,host=localhost,port=2002;urp;StarOffice.ComponentContext")
+                  processing_log = []
+                  deleted_rows = 0
+                  
+                  processing_log.append("Loading workbook with openpyxl...")
+                  
+                  # Try to load with data_only=True to get calculated values
+                  try:
+                      wb_calc = load_workbook(input_file, data_only=True)
+                      wb_main = load_workbook(input_file, data_only=False)
+                      
+                      for sheet_name in wb_main.sheetnames:
+                          sheet_main = wb_main[sheet_name]
+                          sheet_calc = wb_calc[sheet_name]
+                          
+                          processing_log.append(f"Processing sheet: {sheet_name}")
+                          
+                          # Find rows to delete
+                          rows_to_delete = []
+                          max_row = sheet_main.max_row
+                          
+                          for row_num in range(1, max_row + 1):
+                              # Get calculated values from data_only workbook
+                              f_val = sheet_calc.cell(row=row_num, column=6).value
+                              g_val = sheet_calc.cell(row=row_num, column=7).value
+                              h_val = sheet_calc.cell(row=row_num, column=8).value
+                              i_val = sheet_calc.cell(row=row_num, column=9).value
+                              
+                              # Check if ALL four columns are empty/zero
+                              def is_empty_or_zero(val):
+                                  if val is None:
+                                      return True
+                                  if val == 0:
+                                      return True
+                                  if val == "":
+                                      return True
+                                  if isinstance(val, str) and val.strip() == '':
+                                      return True
+                                  if isinstance(val, str) and val.strip() == '0':
+                                      return True
+                                  return False
+                              
+                              if (is_empty_or_zero(f_val) and 
+                                  is_empty_or_zero(g_val) and 
+                                  is_empty_or_zero(h_val) and 
+                                  is_empty_or_zero(i_val)):
+                                  
+                                  rows_to_delete.append(row_num)
+                          
+                          processing_log.append(f"Found {len(rows_to_delete)} rows to delete in {sheet_name}")
+                          
+                          # Delete rows from bottom to top
+                          for row_num in reversed(rows_to_delete):
+                              sheet_main.delete_rows(row_num)
+                              deleted_rows += 1
+                          
+                          processing_log.append(f"Deleted {len(rows_to_delete)} rows from {sheet_name}")
+                      
+                      # Save the processed file
+                      wb_main.save(output_file)
+                      wb_main.close()
+                      wb_calc.close()
+                      
+                      processing_log.append(f"Successfully processed file with {deleted_rows} rows deleted")
+                      return True, processing_log, deleted_rows
+                      
+                  except Exception as e:
+                      processing_log.append(f"openpyxl processing failed: {str(e)}")
+                      return False, processing_log, 0
               
-              desktop = context.ServiceManager.createInstanceWithContext(
-                  "com.sun.star.frame.Desktop", context)
-              
-              # Open the Excel file
-              url = uno.systemPathToFileUrl(os.path.abspath("input.xlsx"))
-              document = desktop.loadComponentFromURL(url, "_blank", 0, ())
-              
-              # Execute the macro
+              except Exception as e:
+                  return False, [f"Processing error: {str(e)}"], 0
+
+          def upload_to_github_release(file_path, file_id):
+              """Upload file to GitHub release for download"""
               try:
-                  # Get the macro
-                  provider = context.ServiceManager.createInstance(
-                      "com.sun.star.script.provider.MasterScriptProviderFactory")
-                  script_provider = provider.createScriptProvider("")
+                  tag_name = f"temp-{file_id}-{int(time.time())}"
                   
-                  # Run the DeleteEmptyRows macro
-                  script = script_provider.getScript(
-                      "vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=user")
-                  script.invoke([], [], [])
+                  # Create release using gh CLI
+                  create_cmd = [
+                      'gh', 'release', 'create', tag_name,
+                      file_path,
+                      '--title', f'Processed Excel File {file_id}',
+                      '--notes', 'Temporary release for processed Excel file',
+                      '--prerelease'
+                  ]
                   
-                  # Save the document
-                  document.storeAsURL(uno.systemPathToFileUrl(os.path.abspath("output.xlsx")), ())
-                  print("Processing completed successfully")
+                  result = subprocess.run(create_cmd, capture_output=True, text=True)
+                  
+                  if result.returncode == 0:
+                      # Get download URL
+                      view_cmd = ['gh', 'release', 'view', tag_name, '--json', 'assets']
+                      view_result = subprocess.run(view_cmd, capture_output=True, text=True)
+                      
+                      if view_result.returncode == 0:
+                          release_data = json.loads(view_result.stdout)
+                          if release_data.get('assets'):
+                              download_url = release_data['assets'][0]['url']
+                              return download_url
+                  
+                  return None
                   
               except Exception as e:
-                  print(f"Macro execution error: {e}")
-                  return False
-              finally:
-                  document.close(True)
+                  print(f"Upload error: {e}")
+                  return None
+
+          def send_callback(callback_url, callback_token, success, download_url, log, deleted_rows, file_id):
+              """Send results back to Flask app"""
+              payload = {
+                  'file_id': file_id,
+                  'success': success,
+                  'download_url': download_url,
+                  'processing_log': log,
+                  'deleted_rows': deleted_rows
+              }
+              
+              headers = {
+                  'Content-Type': 'application/json',
+                  'Authorization': f'Bearer {callback_token}'
+              }
+              
+              try:
+                  response = requests.post(callback_url, json=payload, headers=headers, timeout=30)
+                  print(f"Callback sent: {response.status_code}")
+                  if response.status_code != 200:
+                      print(f"Callback error: {response.text}")
+              except Exception as e:
+                  print(f"Callback failed: {e}")
+
+          def main():
+              input_file = "input.xlsx"
+              output_file = "output.xlsx"
+              
+              callback_url = os.environ.get('CALLBACK_URL')
+              callback_token = os.environ.get('CALLBACK_TOKEN')
+              file_id = os.environ.get('FILE_ID')
+              
+              print(f"Processing file {file_id}")
+              print(f"Callback URL: {callback_url}")
+              
+              # Process the Excel file
+              success, log, deleted_rows = process_excel_with_openpyxl(input_file, output_file)
+              
+              print("Processing log:")
+              for entry in log:
+                  print(f"  {entry}")
+              
+              if success and os.path.exists(output_file):
+                  print("Processing completed successfully, uploading...")
                   
-              return True
+                  # Upload to GitHub release
+                  download_url = upload_to_github_release(output_file, file_id)
+                  
+                  if download_url:
+                      print(f"File uploaded: {download_url}")
+                      send_callback(callback_url, callback_token, True, download_url, log, deleted_rows, file_id)
+                  else:
+                      print("Upload failed")
+                      send_callback(callback_url, callback_token, False, None, log + ["Upload failed"], 0, file_id)
+              else:
+                  print("Processing failed")
+                  send_callback(callback_url, callback_token, False, None, log, 0, file_id)
 
           if __name__ == "__main__":
-              success = run_macro()
-              sys.exit(0 if success else 1)
+              main()
           EOF
 
-          # Install UNO Python bindings
-          sudo apt-get install -y python3-uno
-
-          # Run the processing
-          python3 run_macro.py
-
-      - name: Upload processed file
-        if: success()
+      - name: Process Excel file
+        env:
+          CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+          CALLBACK_TOKEN: ${{ github.event.client_payload.callback_token }}
+          FILE_ID: ${{ github.event.client_payload.file_id }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          # Upload the processed file back to your server
-          curl -X POST \
-               -H "Authorization: Bearer ${{ secrets.API_TOKEN }}" \
-               -H "Content-Type: multipart/form-data" \
-               -F "file=@output.xlsx" \
-               -F "job_id=${{ github.event.client_payload.job_id }}" \
-               "${{ github.event.client_payload.callback_url }}"
+          python process_excel.py
 
-      - name: Report failure
-        if: failure()
-        run: |
-          curl -X POST \
-               -H "Authorization: Bearer ${{ secrets.API_TOKEN }}" \
-               -H "Content-Type: application/json" \
-               -d '{"job_id":"${{ github.event.client_payload.job_id }}","status":"failed","error":"Processing failed"}' \
-               "${{ github.event.client_payload.callback_url }}"
+      - name: Upload processed file as artifact (backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: processed-excel-${{ github.event.client_payload.file_id }}
+          path: output.xlsx
+          retention-days: 1
