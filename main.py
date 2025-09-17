@@ -568,12 +568,12 @@ Option Explicit
 
 Private Sub _SafeSetEnable(oController As Object, enabled As Boolean)
     On Error Resume Next
-    If Not IsNull(oController) Then
-        Dim oFrame, oWin
+    If Not oController Is Nothing Then
+        Dim oFrame As Object, oWin As Object
         oFrame = oController.getFrame()
-        If Not IsNull(oFrame) Then
+        If Not oFrame Is Nothing Then
             oWin = oFrame.getContainerWindow()
-            If Not IsNull(oWin) Then
+            If Not oWin Is Nothing Then
                 oWin.setEnable(enabled)
             End If
         End If
@@ -583,7 +583,7 @@ End Sub
 
 Private Sub _SaveAndQuit(oDoc As Object)
     On Error Resume Next
-    If Not IsNull(oDoc) Then
+    If Not oDoc Is Nothing Then
         oDoc.store                 ' save in place (keeps XLSX)
         oDoc.close(True)           ' close without prompts
     End If
@@ -634,7 +634,7 @@ Sub DeleteEmptyRows()
         rowsDeleted = rowsDeleted + {count}
 '''
 
-        macro_body += f'''    End If
+        macro_body += '''    End If
 '''
 
     macro_footer = '''
@@ -645,7 +645,8 @@ Sub DeleteEmptyRows()
 EH:
     ' Write a minimal error log to home dir (read by workflow)
     On Error Resume Next
-    Dim f As Integer: f = FreeFile()
+    Dim f As Integer
+    f = FreeFile()
     Open Environ("HOME") & "/macro.log" For Append As #f
     Print #f, "Error " & Err & ": " & Error$ & " at " & Now
     Close #f

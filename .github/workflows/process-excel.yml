@@ -74,7 +74,15 @@ jobs:
       - name: Process Excel file with macro execution (with fallbacks)
         run: |
           cat > process_with_macro.py << 'EOF'
-          import subprocess, os, time, shutil, sys
+          import subprocess, os, time, shutil, sys, tempfile, textwrap
+
+          TIMEOUT_SEC = 600
+
+          def kill_soffice():
+              # Best-effort cleanup so we never hang the job
+              for patt in ("soffice.bin", "soffice"):
+                  try: subprocess.run(["pkill", "-f", patt], check=False)
+                  except Exception: pass
 
           def write_profile_prefs(profile_user_dir: str):
               os.makedirs(profile_user_dir, exist_ok=True)
@@ -86,7 +94,6 @@ jobs:
               <prop oor:name="FirstStartWizardCompleted" oor:type="xs:boolean"><value>true</value></prop>
             </item>
             <item oor:path="/org.openoffice.Office.Common/Security/Scripting">
-              <!-- 0 = Low (allow all macros) only for CI temp profile -->
               <prop oor:name="MacroSecurityLevel" oor:type="xs:int"><value>0</value></prop>
             </item>
           </oor:items>
@@ -124,6 +131,104 @@ jobs:
                       f.write(payload)
                   print(f"Created {path}")
 
+          def start_xvfb():
+              print("Starting Xvfb...")
+              return subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1024x768x24"],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+          def method_cli(profile_uri, env, output_path, macro_uri):
+              cmd = [
+                  "libreoffice",
+                  f"-env:UserInstallation={profile_uri}",
+                  "--headless", "--nologo", "--norestore", "--nodefault",
+                  "--calc",
+                  output_path,
+                  macro_uri,
+              ]
+              print("Command:", " ".join(cmd))
+              return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=TIMEOUT_SEC)
+
+          def method_uno(profile_uri, env, output_path):
+              """Method 3: start a listening soffice and invoke macro via UNO (Python-UNO)."""
+              accept = "socket,host=127.0.0.1,port=2002;urp;"
+              soff = subprocess.Popen([
+                  "libreoffice",
+                  f"-env:UserInstallation={profile_uri}",
+                  "--headless", "--nologo", "--norestore", "--nodefault",
+                  f"--accept={accept}"
+              ], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+              # Write a small helper script to drive UNO cleanly
+              uno_script = textwrap.dedent(f"""
+                  import sys, time, pathlib, uno
+                  from com.sun.star.beans import PropertyValue
+                  from com.sun.star.connection import NoConnectException
+
+                  OUTPUT_PATH = r{output_path!r}
+                  OUTPUT_URL  = pathlib.Path(OUTPUT_PATH).resolve().as_uri()
+
+                  def connect(max_attempts=60, delay=0.5):
+                      local_ctx = uno.getComponentContext()
+                      resolver = local_ctx.ServiceManager.createInstanceWithContext(
+                          'com.sun.star.bridge.UnoUrlResolver', local_ctx)
+                      for _ in range(max_attempts):
+                          try:
+                              return resolver.resolve(
+                                  'uno:socket,host=127.0.0.1,port=2002;urp;StarOffice.ComponentContext'
+                              )
+                          except NoConnectException:
+                              time.sleep(delay)
+                      raise RuntimeError('UNO server not ready')
+
+                  def main():
+                      ctx = connect()
+                      smgr = ctx.ServiceManager
+                      desktop = smgr.createInstanceWithContext('com.sun.star.frame.Desktop', ctx)
+
+                      # Open spreadsheet hidden
+                      hidden = uno.createUnoStruct('com.sun.star.beans.PropertyValue')
+                      hidden.Name = 'Hidden'; hidden.Value = True
+                      doc = desktop.loadComponentFromURL(OUTPUT_URL, '_blank', 0, (hidden,))
+
+                      # Run Basic macro from My Macros
+                      mspi = smgr.createInstanceWithContext(
+                          'com.sun.star.script.provider.MasterScriptProviderFactory', ctx)
+                      provider = mspi.createScriptProvider('')
+                      script = provider.getScript(
+                          'vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=user'
+                      )
+                      script.invoke((), (), ())
+
+                      # Belt & suspenders
+                      try:
+                          doc.store()
+                          doc.close(True)
+                      except Exception:
+                          pass
+
+                      desktop.terminate()
+
+                  if __name__ == '__main__':
+                      main()
+              """).strip()
+
+              with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tf:
+                  tf.write(uno_script)
+                  uno_path = tf.name
+
+              try:
+                  r = subprocess.run(["python3", uno_path], capture_output=True, text=True, env=env, timeout=TIMEOUT_SEC)
+                  if r.stdout: print(r.stdout)
+                  if r.stderr: print(r.stderr)
+                  return r.returncode, r.stdout or r.stderr
+              finally:
+                  try: os.unlink(uno_path)
+                  except Exception: pass
+                  try: soff.terminate(); soff.wait(timeout=5)
+                  except Exception:
+                      try: soff.kill()
+                      except Exception: pass
+
           def execute_macro_via_libreoffice():
               # Sanity checks
               if not os.path.exists('input.xlsx'):
@@ -137,7 +242,7 @@ jobs:
               shutil.copy2('input.xlsx', 'output.xlsx')
               print("Copied input to output file")
 
-              # --- Prepare clean temp LO profile + user macro ---
+              # Prepare clean temp LO profile + user macro
               profile_dir = os.path.abspath("./lo-profile")
               user_dir    = os.path.join(profile_dir, "user")
               macro_dir   = os.path.join(user_dir, "basic", "Standard")
@@ -145,66 +250,47 @@ jobs:
               install_user_macro(macro_dir)
               profile_uri = "file://" + profile_dir  # no trailing slash
 
-              # Xvfb (optional with --headless; safe to keep)
-              print("Starting Xvfb...")
-              xvfb = subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1024x768x24"],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-              time.sleep(2)
-              env = os.environ.copy()
-              env["DISPLAY"] = ":99"
+              # Xvfb (optional but harmless)
+              xvfb = start_xvfb(); time.sleep(2)
+              env = os.environ.copy(); env["DISPLAY"] = ":99"
+
+              output_path = os.path.abspath("output.xlsx")
 
               try:
-                  output_path = os.path.abspath("output.xlsx")
-                  # --- Method 1: My Macros in user profile ---
-                  cmd1 = [
-                      "libreoffice",
-                      f"-env:UserInstallation={profile_uri}",
-                      "--headless", "--nologo", "--norestore", "--nodefault",
-                      "--calc",
-                      output_path,
-                      "macro:///Standard.Module1.DeleteEmptyRows",
-                  ]
                   print("Executing Method 1 (user-profile macro)…")
-                  print("Command:", " ".join(cmd1))
-                  r1 = subprocess.run(cmd1, env=env, capture_output=True, text=True, timeout=600)
+                  r1 = method_cli(profile_uri, env, output_path, "macro:///Standard.Module1.DeleteEmptyRows")
                   print("Method 1 exit:", r1.returncode)
                   if r1.stdout: print("STDOUT:", r1.stdout)
                   if r1.stderr: print("STDERR:", r1.stderr)
 
-                  # If Method 1 fails, try Method 2 (file-scoped macro URI)
                   if r1.returncode != 0:
                       print("Method 1 failed, trying Method 2 (file-scoped macro)…")
-                      cmd2 = [
-                          "libreoffice",
-                          f"-env:UserInstallation={profile_uri}",
-                          "--headless", "--nologo", "--norestore", "--nodefault",
-                          "--calc",
-                          output_path,
-                          "macro://./Standard.Module1.DeleteEmptyRows",
-                      ]
-                      print("Command:", " ".join(cmd2))
-                      r2 = subprocess.run(cmd2, env=env, capture_output=True, text=True, timeout=600)
+                      r2 = method_cli(profile_uri, env, output_path, "macro://./Standard.Module1.DeleteEmptyRows")
                       print("Method 2 exit:", r2.returncode)
                       if r2.stdout: print("STDOUT:", r2.stdout)
                       if r2.stderr: print("STDERR:", r2.stderr)
+
                       if r2.returncode != 0:
-                          return False
+                          print("Method 2 failed, trying Method 3 (UNO driver)…")
+                          code, out = method_uno(profile_uri, env, output_path)
+                          print("Method 3 exit:", code)
+                          if out: print(out)
+                          if code != 0:
+                              return False
 
-                  # Confirm output looks sane
-                  if os.path.exists("output.xlsx"):
-                      size = os.path.getsize("output.xlsx")
-                      print(f"Output file size after macro: {size} bytes")
-                      return size > 1000
-
-                  print("✗ Output file not found after macro execution")
+                  # sanity check on output
+                  if os.path.exists("output.xlsx") and os.path.getsize("output.xlsx") > 1000:
+                      print(f"Output file size after macro: {os.path.getsize('output.xlsx')} bytes")
+                      return True
+                  print("✗ Output file missing/too small")
                   return False
 
               except subprocess.TimeoutExpired:
                   print("✗ LibreOffice macro execution timed out")
                   return False
               finally:
-                  try:
-                      xvfb.terminate(); xvfb.wait(timeout=5)
+                  kill_soffice()
+                  try: xvfb.terminate(); xvfb.wait(timeout=5)
                   except Exception:
                       try: xvfb.kill()
                       except Exception: pass
