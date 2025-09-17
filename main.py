@@ -943,17 +943,63 @@ def process_file_automated(file_id):
         if not file_info:
             return jsonify({'error': 'File not found'}), 404
         
-        # Test GitHub authentication and token generation
+        # GitHub authentication - now working
         github_auth = GitHubAppAuth()
         github_token = github_auth.get_installation_token()
+        github_repo = os.getenv('GITHUB_REPO', 'jewseppi/xlsvc')
         
-        return jsonify({
-            'debug': 'Installation token generated successfully',
-            'file_id': file_id,
-            'filename': file_info['original_filename'],
-            'token_length': len(github_token)
-        }), 200
+        # Create job ID and callback token
+        job_id = secrets.token_urlsafe(16)
+        callback_token = secrets.token_urlsafe(32)
         
+        # Store job in database
+        conn.execute(
+            '''INSERT INTO processing_jobs (job_id, user_id, original_file_id, status)
+               VALUES (?, ?, ?, ?)''',
+            (job_id, user['id'], file_id, 'pending')
+        )
+        conn.commit()
+        conn.close()
+        
+        # Prepare GitHub Actions payload
+        base_url = request.host_url.rstrip('/')
+        github_payload = {
+            "event_type": "process-excel",
+            "client_payload": {
+                "file_id": str(file_id),
+                "file_url": f"{base_url}/api/download/{file_id}",
+                "callback_url": f"{base_url}/api/processing-callback",
+                "callback_token": callback_token
+            }
+        }
+        
+        headers = {
+            'Authorization': f'Bearer {github_token}',
+            'Accept': 'application/vnd.github.v3+json',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.post(
+            f'https://api.github.com/repos/{github_repo}/dispatches',
+            headers=headers,
+            json=github_payload,
+            timeout=30
+        )
+        
+        if response.status_code == 204:
+            return jsonify({
+                'message': 'Processing started via GitHub Actions',
+                'job_id': job_id,
+                'status': 'pending',
+                'estimated_time': '2-3 minutes'
+            }), 202
+        else:
+            return jsonify({
+                'error': 'Failed to start GitHub Actions processing',
+                'details': response.text,
+                'status_code': response.status_code
+            }), 500
+            
     except Exception as e:
         return jsonify({'error': str(e)}), 500
  
