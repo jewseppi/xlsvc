@@ -7,3 +7,4 @@ xlrd==2.0.1
 requests
 python-multipart
 PyJWT==2.8.0
+cryptography>=3.4.8
