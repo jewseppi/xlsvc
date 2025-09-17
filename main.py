@@ -931,7 +931,7 @@ class GitHubAppAuth:
             'char_codes_first_100': [ord(c) for c in raw_key[:100]]
         }
         
-        return jsonify(checks)
+        print(jsonify(checks))
 
         self.private_key = fix_private_key_format(raw_key)
 
