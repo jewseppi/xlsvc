@@ -924,6 +924,13 @@ class GitHubAppAuth:
 @jwt_required()
 def process_file_automated(file_id):
     """Trigger GitHub Actions processing using GitHub App authentication"""
+
+    return jsonify({
+        'GITHUB_INSTALLATION_ID': os.getenv('GITHUB_INSTALLATION_ID'),
+        'GITHUB_APP_ID': os.getenv('GITHUB_APP_ID'),
+        'GITHUB_REPO': os.getenv('GITHUB_REPO'),
+        'has_private_key': bool(os.getenv('GITHUB_PRIVATE_KEY'))
+    })
     
     try:
         current_user_email = get_jwt_identity()
