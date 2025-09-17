@@ -883,6 +883,15 @@ def debug_storage():
 @app.route('/api/process-automated/<int:file_id>', methods=['POST'])
 @jwt_required()
 def process_file_automated(file_id):
+    # Debug environment variables
+    github_token = os.getenv("GITHUB_TOKEN")
+    github_repo = os.getenv("GITHUB_REPO")
+    
+    if not github_token:
+        return jsonify({'error': 'GITHUB_TOKEN not found - .env not loaded'}), 500
+    if not github_repo:
+        return jsonify({'error': 'GITHUB_REPO not found - .env not loaded'}), 500
+    
     """Trigger GitHub Actions processing"""
     print(f"DEBUG: Starting automated processing for file {file_id}")
     print(f"DEBUG: GITHUB_TOKEN exists: {bool(os.getenv('GITHUB_TOKEN'))}")
