@@ -51,10 +51,15 @@ jobs:
 
       - name: Install Dependencies and Setup
         uses: appleboy/ssh-action@v1.0.0
+        env:
+          GITHUB_APP_ID: ${{ secrets.APP_ID }}
+          GITHUB_INSTALLATION_ID: ${{ secrets.INSTALLATION_ID }}
+          GITHUB_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: GITHUB_APP_ID,GITHUB_INSTALLATION_ID,GITHUB_PRIVATE_KEY
           script: |
             set -euo pipefail
 
@@ -76,17 +81,18 @@ jobs:
             WSGI_EOF
 
             # Create directories
-            mkdir -p uploads tmp
-            chmod 755 uploads
+            mkdir -p uploads tmp macros processed
+            chmod 755 uploads macros processed
 
             # Initialize database if it doesn't exist
             if [ ! -f xlsvc.db ]; then
               python -c "from main import init_db; init_db()" || echo "Database init skipped - no init_db function"
             fi
 
-            echo "GITHUB_APP_ID=${{ secrets.APP_ID }}" > .env
-            echo "GITHUB_INSTALLATION_ID=${{ secrets.INSTALLATION_ID }}" >> .env
-            echo "GITHUB_PRIVATE_KEY=\"${{ secrets.APP_PRIVATE_KEY }}\"" >> .env
+            # Create .env file with GitHub App credentials
+            echo "GITHUB_APP_ID=${GITHUB_APP_ID}" > .env
+            echo "GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}" >> .env
+            echo "GITHUB_PRIVATE_KEY=\"${GITHUB_PRIVATE_KEY}\"" >> .env
             echo "GITHUB_REPO=${{ github.repository }}" >> .env
             echo "BASE_URL=https://api.xlsvc.jsilverman.ca" >> .env
             chmod 600 .env
@@ -107,7 +113,7 @@ jobs:
 
             # Set permissions
             chmod 644 *.py requirements.txt .htaccess passenger_wsgi.py 2>/dev/null || true
-            chmod 755 uploads
+            chmod 755 uploads macros processed
             chmod 644 xlsvc.db 2>/dev/null || true
 
             # Restart Passenger
