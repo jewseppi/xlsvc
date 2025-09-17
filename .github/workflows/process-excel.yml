@@ -183,22 +183,22 @@ jobs:
                   output_path = os.path.abspath('output.xlsx')
                   print(f"Processing file: {output_path}")
                   
-                  # Try to execute the macro using LibreOffice
-                  # Method 1: Use macro URL
+                  # Try LibreOffice macro execution with proper syntax for version 24.2
+                  # Method 1: Try with Basic macro execution
                   cmd = [
                       'libreoffice',
                       '--headless',
                       '--invisible',
-                      '--nologo',
+                      '--nologo', 
                       '--norestore',
                       '--nodefault',
                       '--nolockcheck',
                       '--calc',
-                      f'--macro-url=vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=user',
-                      output_path
+                      output_path,
+                      '--macro=vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=user'
                   ]
                   
-                  print("Executing LibreOffice macro...")
+                  print("Executing LibreOffice macro (Method 1)...")
                   print(f"Command: {' '.join(cmd)}")
                   
                   result = subprocess.run(
@@ -209,11 +209,40 @@ jobs:
                       timeout=180  # 3 minutes timeout
                   )
                   
-                  print(f"LibreOffice exit code: {result.returncode}")
+                  print(f"Method 1 - LibreOffice exit code: {result.returncode}")
                   if result.stdout:
                       print(f"STDOUT: {result.stdout}")
                   if result.stderr:
                       print(f"STDERR: {result.stderr}")
+                  
+                  # If Method 1 failed, try Method 2: Execute macro via direct command
+                  if result.returncode != 0:
+                      print("Method 1 failed, trying Method 2...")
+                      
+                      # Method 2: Try alternative macro syntax
+                      cmd2 = [
+                          'libreoffice',
+                          '--headless',
+                          '--calc',
+                          f'--macro={macro_dir}/Module1.bas::DeleteEmptyRows',
+                          output_path
+                      ]
+                      
+                      print(f"Method 2 Command: {' '.join(cmd2)}")
+                      
+                      result2 = subprocess.run(
+                          cmd2,
+                          env=env,
+                          capture_output=True,
+                          text=True,
+                          timeout=180
+                      )
+                      
+                      print(f"Method 2 - LibreOffice exit code: {result2.returncode}")
+                      if result2.stdout:
+                          print(f"Method 2 STDOUT: {result2.stdout}")
+                      if result2.stderr:
+                          print(f"Method 2 STDERR: {result2.stderr}")
                   
                   # Check if the file was modified
                   if os.path.exists('output.xlsx'):
