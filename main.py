@@ -881,30 +881,32 @@ def debug_storage():
         return jsonify({'error': str(e)}), 500
     
 def fix_private_key_format(key_string):
-    """Convert single-line private key to proper multi-line format"""
-    # Handle both literal \n and actual newlines
-    key_string = key_string.replace('\\n', '\n').strip()
+    """Convert single-line private key to proper multi-line format with debugging"""
+    print(f"DEBUG: Raw key length: {len(key_string)}")
+    print(f"DEBUG: Raw key first 100 chars: {key_string[:100]}")
+    print(f"DEBUG: Contains \\n: {'\\n' in key_string}")
+    print(f"DEBUG: Contains actual newline: {chr(10) in key_string}")
     
-    # If it's already multi-line, return as-is
-    if '\n' in key_string and '-----BEGIN RSA PRIVATE KEY-----\n' in key_string:
-        return key_string
-    
-    # Extract just the key content (remove markers temporarily)
+    # Force split the key content regardless of format
     begin_marker = '-----BEGIN RSA PRIVATE KEY-----'
     end_marker = '-----END RSA PRIVATE KEY-----'
     
-    # Remove markers and any spaces
-    content = key_string.replace(begin_marker, '').replace(end_marker, '').strip()
+    # Remove all whitespace and markers, get just the base64 content
+    clean_content = key_string.replace(begin_marker, '').replace(end_marker, '')
+    clean_content = ''.join(clean_content.split())  # Remove ALL whitespace
     
-    # Split into 64-character lines
+    print(f"DEBUG: Clean content length: {len(clean_content)}")
+    
+    # Rebuild the key with proper formatting
     lines = [begin_marker]
-    for i in range(0, len(content), 64):
-        line = content[i:i+64]
-        if line.strip():  # Only add non-empty lines
-            lines.append(line)
+    for i in range(0, len(clean_content), 64):
+        lines.append(clean_content[i:i+64])
     lines.append(end_marker)
     
-    return '\n'.join(lines)
+    result = '\n'.join(lines)
+    print(f"DEBUG: Result line count: {len(result.split(chr(10)))}")
+    
+    return result
 
 class GitHubAppAuth:
     def __init__(self):
