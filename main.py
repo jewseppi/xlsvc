@@ -943,16 +943,15 @@ def process_file_automated(file_id):
         if not file_info:
             return jsonify({'error': 'File not found'}), 404
         
-        # Test GitHub authentication
+        # Test GitHub authentication and token generation
         github_auth = GitHubAppAuth()
+        github_token = github_auth.get_installation_token()
         
         return jsonify({
-            'debug': 'Testing GitHub auth',
+            'debug': 'Installation token generated successfully',
             'file_id': file_id,
             'filename': file_info['original_filename'],
-            'app_id': github_auth.app_id,
-            'installation_id': github_auth.installation_id,
-            'private_key_length': len(github_auth.private_key) if github_auth.private_key else 0
+            'token_length': len(github_token)
         }), 200
         
     except Exception as e:
