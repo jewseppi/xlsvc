@@ -915,7 +915,6 @@ class GitHubAppAuth:
         else:
             raise Exception(f"Failed to get installation token: {response.status_code} {response.text}")
 
-
 @app.route('/api/process-automated/<int:file_id>', methods=['POST'])
 @jwt_required()
 def process_file_automated(file_id):
@@ -1160,6 +1159,52 @@ def analyze_excel_file(input_path):
     except Exception as e:
         print(f"Analysis error: {e}")
         return {}
+
+@app.route('/api/get-macro/<int:file_id>', methods=['GET'])
+def get_macro_for_file(file_id):
+    """Get the macro file content for a processed file"""
+    try:
+        conn = get_db()
+        
+        # Get the original file info first
+        original_file = conn.execute(
+            'SELECT user_id, original_filename FROM files WHERE id = ?', 
+            (file_id,)
+        ).fetchone()
+        
+        if not original_file:
+            return jsonify({'error': 'Original file not found'}), 404
+        
+        # Find the macro file for this original file
+        macro_file = conn.execute(
+            '''SELECT stored_filename, original_filename FROM files 
+               WHERE user_id = ? AND file_type = 'macro'
+               AND original_filename LIKE ?
+               ORDER BY upload_date DESC LIMIT 1''',
+            (original_file['user_id'], f'Macro_{original_file["original_filename"]}%')
+        ).fetchone()
+        
+        conn.close()
+        
+        if not macro_file:
+            return jsonify({'error': 'Macro not found for this file'}), 404
+        
+        # Read the macro file content
+        macro_path = os.path.join(app.config['MACROS_FOLDER'], macro_file['stored_filename'])
+        
+        if not os.path.exists(macro_path):
+            return jsonify({'error': 'Macro file not found on disk'}), 404
+        
+        with open(macro_path, 'r', encoding='utf-8') as f:
+            macro_content = f.read()
+        
+        return jsonify({
+            'macro_content': macro_content,
+            'filename': macro_file['original_filename']
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # Health check
 @app.route('/api/health', methods=['GET'])
