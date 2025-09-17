@@ -972,8 +972,19 @@ def process_file_automated(file_id):
         
         # Get GitHub token using App authentication
         github_auth = GitHubAppAuth()
+
+        print(f"DEBUG: App ID: {github_auth.app_id}")
+        print(f"DEBUG: Installation ID: {github_auth.installation_id}")
+        print(f"DEBUG: Private key length: {len(github_auth.private_key) if github_auth.private_key else 'None'}")
+
         github_token = github_auth.get_installation_token()
         github_repo = os.getenv('GITHUB_REPO', 'jewseppi/xlsvc')
+
+        print(f"DEBUG: Got installation token: {github_token[:20]}...")
+
+        # Then the dispatch call
+        print(f"DEBUG: Dispatching to: https://api.github.com/repos/{github_repo}/dispatches")
+
         
         # Prepare GitHub Actions payload - match your workflow expectations
         base_url = request.host_url.rstrip('/')
