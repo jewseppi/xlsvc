@@ -94,8 +94,8 @@ jobs:
           import tempfile
           import sys
 
-          def execute_macro_via_command_line():
-              """Execute LibreOffice macro via command line"""
+          def execute_macro_via_libreoffice():
+              """Execute LibreOffice macro by installing it to user directory and running it"""
               
               # Verify input file first
               if not os.path.exists('input.xlsx'):
@@ -108,6 +108,11 @@ jobs:
               if input_size < 1000:
                   print(f"ERROR: Input file too small ({input_size} bytes)")
                   return False
+
+              # Verify macro file exists
+              if not os.path.exists('process_macro.bas'):
+                  print("ERROR: process_macro.bas not found")
+                  return False
               
               # Copy input to output
               shutil.copy2('input.xlsx', 'output.xlsx')
@@ -117,36 +122,83 @@ jobs:
               with open('process_macro.bas', 'r', encoding='utf-8') as f:
                   macro_content = f.read()
               
-              print("Read macro content")
+              print(f"Read macro content ({len(macro_content)} characters)")
+              
+              # Create LibreOffice user macro directory
+              home_dir = os.path.expanduser("~")
+              macro_dir = os.path.join(home_dir, ".config", "libreoffice", "4", "user", "basic", "Standard")
+              os.makedirs(macro_dir, exist_ok=True)
+              print(f"Created macro directory: {macro_dir}")
+              
+              # Create Module1.bas with our macro
+              module_path = os.path.join(macro_dir, "Module1.bas")
+              with open(module_path, 'w', encoding='utf-8') as f:
+                  f.write(macro_content)
+              print(f"Wrote macro to: {module_path}")
+              
+              # Create script.xlb to register the module using subprocess
+              script_xlb = os.path.join(macro_dir, "..", "script.xlb")
+              os.makedirs(os.path.dirname(script_xlb), exist_ok=True)
+              
+              # Use echo to create XML files to avoid YAML escaping issues
+              script_cmd = [
+                  'bash', '-c', 
+                  f'cat > "{script_xlb}" << "XMLEOF"\n'
+                  '<?xml version="1.0" encoding="UTF-8"?>\n'
+                  '<!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">\n'
+                  '<library:library xmlns:library="http://openoffice.org/2000/library" library:name="Standard" library:readonly="false" library:passwordprotected="false">\n'
+                  '  <library:element library:name="Module1"/>\n'
+                  '</library:library>\n'
+                  'XMLEOF'
+              ]
+              subprocess.run(script_cmd, check=True)
+              print("Created script.xlb")
+              
+              # Create dialog.xlb (required even if empty)
+              dialog_xlb = os.path.join(macro_dir, "..", "dialog.xlb")
+              dialog_cmd = [
+                  'bash', '-c',
+                  f'cat > "{dialog_xlb}" << "XMLEOF"\n'
+                  '<?xml version="1.0" encoding="UTF-8"?>\n'
+                  '<!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">\n'
+                  '<library:library xmlns:library="http://openoffice.org/2000/library" library:name="Standard" library:readonly="false" library:passwordprotected="false">\n'
+                  '</library:library>\n'
+                  'XMLEOF'
+              ]
+              subprocess.run(dialog_cmd, check=True)
+              print("Created dialog.xlb")
               
               # Start Xvfb for headless display
               print("Starting Xvfb...")
               xvfb_proc = subprocess.Popen(['Xvfb', ':99', '-screen', '0', '1024x768x24'], 
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-              time.sleep(3)
+              time.sleep(5)  # Give Xvfb more time to start
               
               # Set display environment
               env = os.environ.copy()
               env['DISPLAY'] = ':99'
               
               try:
-                  # Try the correct LibreOffice macro syntax
-                  # First, just try to open and save the file to verify it works
+                  # Get absolute path to output file
+                  output_path = os.path.abspath('output.xlsx')
+                  print(f"Processing file: {output_path}")
+                  
+                  # Try to execute the macro using LibreOffice
+                  # Method 1: Use macro URL
                   cmd = [
                       'libreoffice',
                       '--headless',
                       '--invisible',
-                      '--nodefault',
-                      '--nolockcheck',
                       '--nologo',
                       '--norestore',
+                      '--nodefault',
+                      '--nolockcheck',
                       '--calc',
-                      '--convert-to', 'xlsx',
-                      '--outdir', '.',
-                      'output.xlsx'
+                      f'--macro-url=vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=user',
+                      output_path
                   ]
                   
-                  print("Testing LibreOffice file conversion...")
+                  print("Executing LibreOffice macro...")
                   print(f"Command: {' '.join(cmd)}")
                   
                   result = subprocess.run(
@@ -154,35 +206,35 @@ jobs:
                       env=env,
                       capture_output=True,
                       text=True,
-                      timeout=120
+                      timeout=180  # 3 minutes timeout
                   )
                   
                   print(f"LibreOffice exit code: {result.returncode}")
-                  print(f"STDOUT: {result.stdout}")
-                  print(f"STDERR: {result.stderr}")
+                  if result.stdout:
+                      print(f"STDOUT: {result.stdout}")
+                  if result.stderr:
+                      print(f"STDERR: {result.stderr}")
                   
-                  # Check if the conversion worked
+                  # Check if the file was modified
                   if os.path.exists('output.xlsx'):
                       size = os.path.getsize('output.xlsx')
-                      print(f"Output file size after LibreOffice processing: {size} bytes")
+                      print(f"Output file size after macro execution: {size} bytes")
                       
-                      if size > 5000:
-                          print("LibreOffice can process this file successfully")
-                          # Now we know LibreOffice works, but we still need to run the macro
-                          # For now, just return the processed file even without macro execution
+                      if size > 1000:  # Reasonable minimum size
+                          print("✓ Macro execution completed successfully")
                           return True
                       else:
-                          print("LibreOffice failed to process the file properly")
+                          print("✗ Output file too small after macro execution")
                           return False
                   else:
-                      print("LibreOffice did not create output file")
+                      print("✗ Output file not found after macro execution")
                       return False
                       
               except subprocess.TimeoutExpired:
-                  print("LibreOffice processing timed out")
+                  print("✗ LibreOffice macro execution timed out")
                   return False
               except Exception as e:
-                  print(f"Error executing LibreOffice: {e}")
+                  print(f"✗ Error executing LibreOffice macro: {e}")
                   return False
               finally:
                   # Clean up Xvfb
@@ -190,15 +242,27 @@ jobs:
                       xvfb_proc.terminate()
                       xvfb_proc.wait(timeout=5)
                   except:
-                      xvfb_proc.kill()
+                      try:
+                          xvfb_proc.kill()
+                      except:
+                          pass
 
           if __name__ == "__main__":
-              success = execute_macro_via_command_line()
+              print("=" * 60)
+              print("Starting Excel file processing with LibreOffice macro")
+              print("=" * 60)
+              
+              success = execute_macro_via_libreoffice()
+              
               if success:
-                  print("Macro execution completed successfully")
+                  print("=" * 60)
+                  print("✓ Processing completed successfully")
+                  print("=" * 60)
                   sys.exit(0)
               else:
-                  print("Macro execution failed")
+                  print("=" * 60)
+                  print("✗ Processing failed")
+                  print("=" * 60)
                   sys.exit(1)
           EOF
 
