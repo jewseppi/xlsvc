@@ -923,8 +923,36 @@ class GitHubAppAuth:
 @app.route('/api/process-automated/<int:file_id>', methods=['POST'])
 @jwt_required()
 def process_file_automated(file_id):
-    return jsonify({'debug': 'Route reached', 'file_id': file_id}), 200  # Add this first
-
+    """Trigger GitHub Actions processing using GitHub App authentication"""
+    
+    try:
+        current_user_email = get_jwt_identity()
+        
+        # Get file info and verify ownership
+        conn = get_db()
+        user = conn.execute(
+            'SELECT id FROM users WHERE email = ?', (current_user_email,)
+        ).fetchone()
+        
+        file_info = conn.execute(
+            '''SELECT f.* FROM files f
+               WHERE f.id = ? AND f.user_id = ?''',
+            (file_id, user['id'])
+        ).fetchone()
+        
+        if not file_info:
+            return jsonify({'error': 'File not found'}), 404
+        
+        # Debug point 1
+        return jsonify({
+            'debug': 'File found, attempting GitHub auth',
+            'file_id': file_id,
+            'filename': file_info['original_filename']
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+ 
     """Trigger GitHub Actions processing using GitHub App authentication"""
     print(f"DEBUG: Starting automated processing for file {file_id}")
 
