@@ -28,13 +28,10 @@ jobs:
           FILE_URL: ${{ github.event.client_payload.file_url }}
         run: |
           echo "Downloading file from: $FILE_URL"
-
-          # Simple download - token is already in the URL as query parameter
           curl -L \
             -H "User-Agent: GitHub-Actions-Excel-Processor" \
             -o input.xlsx \
             "$FILE_URL"
-
           echo "Download completed. File details:"
           ls -la input.xlsx
           file input.xlsx
@@ -45,31 +42,21 @@ jobs:
           FILE_ID: ${{ github.event.client_payload.file_id }}
         run: |
           cat > get_macro.py << 'EOF'
-          import os
-          import requests
-          import json
-
-          # Get the macro content from your Flask API
+          import os, requests
           callback_url = os.environ.get('CALLBACK_URL')
           base_url = callback_url.replace('/api/processing-callback', '')
           file_id = os.environ.get('FILE_ID')
-
           print(f"Getting macro for file {file_id} from {base_url}")
-
-          # Call your Flask API to get the macro
-          response = requests.get(f"{base_url}/api/get-macro/{file_id}", timeout=30)
-
-          if response.status_code == 200:
-              macro_data = response.json()
-              with open('process_macro.bas', 'w', encoding='utf-8') as f:
-                  f.write(macro_data['macro_content'])
-              print("Macro downloaded successfully")
-              print(f"Macro filename: {macro_data.get('filename', 'unknown')}")
-          else:
-              print(f"Failed to get macro: {response.status_code} {response.text}")
-              exit(1)
+          r = requests.get(f"{base_url}/api/get-macro/{file_id}", timeout=30)
+          if r.status_code != 200:
+              print(f"Failed to get macro: {r.status_code} {r.text}")
+              raise SystemExit(1)
+          macro_data = r.json()
+          with open('process_macro.bas', 'w', encoding='utf-8') as f:
+              f.write(macro_data['macro_content'])
+          print("Macro downloaded successfully")
+          print(f"Macro filename: {macro_data.get('filename','unknown')}")
           EOF
-
           python get_macro.py
 
       - name: Check downloaded file
@@ -79,153 +66,127 @@ jobs:
           file input.xlsx
           if [ $(stat -c%s input.xlsx) -lt 1000 ]; then
             echo "ERROR: Downloaded file is too small ($(stat -c%s input.xlsx) bytes)"
-            echo "File content:"
+            echo "File head:"
             hexdump -C input.xlsx | head -10
             exit 1
           fi
 
-      - name: Process Excel file with macro execution
+      - name: Process Excel file with macro execution (with fallbacks)
         run: |
           cat > process_with_macro.py << 'EOF'
-          import subprocess
-          import os
-          import time
-          import shutil
-          import tempfile
-          import sys
+          import subprocess, os, time, shutil, sys
 
-          def execute_macro_via_libreoffice():
-              """Execute LibreOffice macro by installing it to user directory and running it"""
-              
-              # Verify input file first
-              if not os.path.exists('input.xlsx'):
-                  print("ERROR: input.xlsx not found")
-                  return False
-                  
-              input_size = os.path.getsize('input.xlsx')
-              print(f"Input file size: {input_size} bytes")
-              
-              if input_size < 1000:
-                  print(f"ERROR: Input file too small ({input_size} bytes)")
-                  return False
+          def write_profile_prefs(profile_user_dir: str):
+              os.makedirs(profile_user_dir, exist_ok=True)
+              xcu = os.path.join(profile_user_dir, "registrymodifications.xcu")
+              with open(xcu, "w", encoding="utf-8") as f:
+                  f.write("""<?xml version="1.0" encoding="UTF-8"?>
+          <oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <item oor:path="/org.openoffice.Office.Common/Misc">
+              <prop oor:name="FirstStartWizardCompleted" oor:type="xs:boolean"><value>true</value></prop>
+            </item>
+            <item oor:path="/org.openoffice.Office.Common/Security/Scripting">
+              <!-- 0 = Low (allow all macros) only for CI temp profile -->
+              <prop oor:name="MacroSecurityLevel" oor:type="xs:int"><value>0</value></prop>
+            </item>
+          </oor:items>
+          """)
+              print(f"Wrote {xcu}")
 
-              # Verify macro file exists
-              if not os.path.exists('process_macro.bas'):
-                  print("ERROR: process_macro.bas not found")
-                  return False
-              
-              # Copy input to output
-              shutil.copy2('input.xlsx', 'output.xlsx')
-              print("Copied input to output file")
-              
-              # Read the macro content
+          def install_user_macro(macro_dir: str):
+              os.makedirs(macro_dir, exist_ok=True)
+              module_path = os.path.join(macro_dir, "Module1.bas")
               with open('process_macro.bas', 'r', encoding='utf-8') as f:
                   macro_content = f.read()
-              
-              print(f"Read macro content ({len(macro_content)} characters)")
-              
-              # Create LibreOffice user macro directory
-              home_dir = os.path.expanduser("~")
-              macro_dir = os.path.join(home_dir, ".config", "libreoffice", "4", "user", "basic", "Standard")
-              os.makedirs(macro_dir, exist_ok=True)
-              print(f"Created macro directory: {macro_dir}")
-              
-              # Create Module1.bas with our macro
-              module_path = os.path.join(macro_dir, "Module1.bas")
               with open(module_path, 'w', encoding='utf-8') as f:
                   f.write(macro_content)
               print(f"Wrote macro to: {module_path}")
-              
-              # Create script.xlb to register the module using subprocess
-              script_xlb = os.path.join(macro_dir, "..", "script.xlb")
-              os.makedirs(os.path.dirname(script_xlb), exist_ok=True)
-              
-              # Use echo to create XML files to avoid YAML escaping issues
-              script_cmd = [
-                  'bash', '-c', 
-                  f'cat > "{script_xlb}" << "XMLEOF"\n'
-                  '<?xml version="1.0" encoding="UTF-8"?>\n'
-                  '<!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">\n'
-                  '<library:library xmlns:library="http://openoffice.org/2000/library" library:name="Standard" library:readonly="false" library:passwordprotected="false">\n'
-                  '  <library:element library:name="Module1"/>\n'
-                  '</library:library>\n'
-                  'XMLEOF'
-              ]
-              subprocess.run(script_cmd, check=True)
-              print("Created script.xlb")
-              
-              # Create dialog.xlb (required even if empty)
-              dialog_xlb = os.path.join(macro_dir, "..", "dialog.xlb")
-              dialog_cmd = [
-                  'bash', '-c',
-                  f'cat > "{dialog_xlb}" << "XMLEOF"\n'
-                  '<?xml version="1.0" encoding="UTF-8"?>\n'
-                  '<!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">\n'
-                  '<library:library xmlns:library="http://openoffice.org/2000/library" library:name="Standard" library:readonly="false" library:passwordprotected="false">\n'
-                  '</library:library>\n'
-                  'XMLEOF'
-              ]
-              subprocess.run(dialog_cmd, check=True)
-              print("Created dialog.xlb")
-              
-              # Start Xvfb for headless display
-              # Start Xvfb (optional when using --headless, but we'll keep it)
+
+              # Register library via script.xlb/dialog.xlb
+              basic_root = os.path.dirname(macro_dir)  # .../user/basic
+              script_xlb = os.path.join(basic_root, "script.xlb")
+              dialog_xlb = os.path.join(basic_root, "dialog.xlb")
+              for path, payload in [
+                (script_xlb, """<?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">
+          <library:library xmlns:library="http://openoffice.org/2000/library" library:name="Standard" library:readonly="false" library:passwordprotected="false">
+            <library:element library:name="Module1"/>
+          </library:library>
+          """),
+                (dialog_xlb, """<?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">
+          <library:library xmlns:library="http://openoffice.org/2000/library" library:name="Standard" library:readonly="false" library:passwordprotected="false">
+          </library:library>
+          """)
+              ]:
+                  os.makedirs(os.path.dirname(path), exist_ok=True)
+                  with open(path, 'w', encoding='utf-8') as f:
+                      f.write(payload)
+                  print(f"Created {path}")
+
+          def execute_macro_via_libreoffice():
+              # Sanity checks
+              if not os.path.exists('input.xlsx'):
+                  print("ERROR: input.xlsx not found"); return False
+              if os.path.getsize('input.xlsx') < 1000:
+                  print("ERROR: Input file too small"); return False
+              if not os.path.exists('process_macro.bas'):
+                  print("ERROR: process_macro.bas not found"); return False
+
+              # Work on a copy
+              shutil.copy2('input.xlsx', 'output.xlsx')
+              print("Copied input to output file")
+
+              # --- Prepare clean temp LO profile + user macro ---
+              profile_dir = os.path.abspath("./lo-profile")
+              user_dir    = os.path.join(profile_dir, "user")
+              macro_dir   = os.path.join(user_dir, "basic", "Standard")
+              write_profile_prefs(user_dir)
+              install_user_macro(macro_dir)
+              profile_uri = "file://" + profile_dir  # no trailing slash
+
+              # Xvfb (optional with --headless; safe to keep)
               print("Starting Xvfb...")
-              xvfb_proc = subprocess.Popen(
-                  ["Xvfb", ":99", "-screen", "0", "1024x768x24"],
-                  stdout=subprocess.DEVNULL,
-                  stderr=subprocess.DEVNULL,
-              )
+              xvfb = subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1024x768x24"],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
               time.sleep(2)
               env = os.environ.copy()
               env["DISPLAY"] = ":99"
 
               try:
                   output_path = os.path.abspath("output.xlsx")
-                  print(f"Processing file: {output_path}")
-
-                  # ✅ Correct: macro URI is a separate positional argument
+                  # --- Method 1: My Macros in user profile ---
                   cmd1 = [
                       "libreoffice",
-                      "--headless",
-                      "--nologo",
-                      "--norestore",
-                      "--nodefault",
+                      f"-env:UserInstallation={profile_uri}",
+                      "--headless", "--nologo", "--norestore", "--nodefault",
                       "--calc",
                       output_path,
                       "macro:///Standard.Module1.DeleteEmptyRows",
                   ]
-
-                  print("Executing LibreOffice macro (Method 1)…")
+                  print("Executing Method 1 (user-profile macro)…")
                   print("Command:", " ".join(cmd1))
-                  r1 = subprocess.run(cmd1, env=env, capture_output=True, text=True, timeout=180)
-                  print("Exit code:", r1.returncode)
-                  if r1.stdout:
-                      print("STDOUT:", r1.stdout)
-                  if r1.stderr:
-                      print("STDERR:", r1.stderr)
+                  r1 = subprocess.run(cmd1, env=env, capture_output=True, text=True, timeout=600)
+                  print("Method 1 exit:", r1.returncode)
+                  if r1.stdout: print("STDOUT:", r1.stdout)
+                  if r1.stderr: print("STDERR:", r1.stderr)
 
-                  # If that didn’t work, try the relative “from this file” container:
-                  # (useful if the macro ends up embedded in the document; harmless otherwise)
+                  # If Method 1 fails, try Method 2 (file-scoped macro URI)
                   if r1.returncode != 0:
-                      print("Method 1 failed, trying Method 2 (file-scoped macro URI)…")
+                      print("Method 1 failed, trying Method 2 (file-scoped macro)…")
                       cmd2 = [
                           "libreoffice",
-                          "--headless",
-                          "--nologo",
-                          "--norestore",
-                          "--nodefault",
+                          f"-env:UserInstallation={profile_uri}",
+                          "--headless", "--nologo", "--norestore", "--nodefault",
                           "--calc",
                           output_path,
                           "macro://./Standard.Module1.DeleteEmptyRows",
                       ]
                       print("Command:", " ".join(cmd2))
-                      r2 = subprocess.run(cmd2, env=env, capture_output=True, text=True, timeout=180)
-                      print("Exit code:", r2.returncode)
-                      if r2.stdout:
-                          print("STDOUT:", r2.stdout)
-                      if r2.stderr:
-                          print("STDERR:", r2.stderr)
+                      r2 = subprocess.run(cmd2, env=env, capture_output=True, text=True, timeout=600)
+                      print("Method 2 exit:", r2.returncode)
+                      if r2.stdout: print("STDOUT:", r2.stdout)
+                      if r2.stderr: print("STDERR:", r2.stderr)
                       if r2.returncode != 0:
                           return False
 
@@ -243,31 +204,32 @@ jobs:
                   return False
               finally:
                   try:
-                      xvfb_proc.terminate()
-                      xvfb_proc.wait(timeout=5)
+                      xvfb.terminate(); xvfb.wait(timeout=5)
                   except Exception:
-                      try:
-                          xvfb_proc.kill()
-                      except Exception:
-                          pass
+                      try: xvfb.kill()
+                      except Exception: pass
 
           if __name__ == "__main__":
               print("=" * 60)
               print("Starting Excel file processing with LibreOffice macro")
               print("=" * 60)
-              
-              success = execute_macro_via_libreoffice()
-              
-              if success:
-                  print("=" * 60)
+              ok = execute_macro_via_libreoffice()
+              # Dump optional macro log (if your Basic writes one)
+              log = os.path.expanduser("~/macro.log")
+              print("---- macro.log (if any) ----")
+              if os.path.exists(log):
+                  try:
+                      with open(log, "r", encoding="utf-8") as f:
+                          print(f.read())
+                  except Exception as e:
+                      print(f"(could not read macro.log: {e})")
+              print("=" * 60)
+              if ok:
                   print("✓ Processing completed successfully")
-                  print("=" * 60)
-                  sys.exit(0)
+                  print("=" * 60); sys.exit(0)
               else:
-                  print("=" * 60)
                   print("✗ Processing failed")
-                  print("=" * 60)
-                  sys.exit(1)
+                  print("=" * 60); sys.exit(1)
           EOF
 
           python process_with_macro.py
@@ -279,103 +241,37 @@ jobs:
           FILE_ID: ${{ github.event.client_payload.file_id }}
         run: |
           cat > upload_and_callback.py << 'EOF'
-          import os
-          import requests
-          import subprocess
-          import json
-          import time
-
-          def upload_to_github_release(file_path, file_id):
-              """Upload file to GitHub release for download"""
-              try:
-                  tag_name = f"temp-{file_id}-{int(time.time())}"
-                  
-                  # Create release using gh CLI
-                  create_cmd = [
-                      'gh', 'release', 'create', tag_name,
-                      file_path,
-                      '--title', f'Processed Excel File {file_id}',
-                      '--notes', 'Temporary release for processed Excel file',
-                      '--prerelease'
-                  ]
-                  
-                  result = subprocess.run(create_cmd, capture_output=True, text=True)
-                  
-                  if result.returncode == 0:
-                      # Get download URL
-                      view_cmd = ['gh', 'release', 'view', tag_name, '--json', 'assets']
-                      view_result = subprocess.run(view_cmd, capture_output=True, text=True)
-                      
-                      if view_result.returncode == 0:
-                          release_data = json.loads(view_result.stdout)
-                          if release_data.get('assets'):
-                              download_url = release_data['assets'][0]['url']
-                              return download_url
-                  
-                  print(f"Upload failed: {result.stderr}")
-                  return None
-                  
-              except Exception as e:
-                  print(f"Upload error: {e}")
-                  return None
-
+          import os, requests, subprocess, json, time
           def send_callback(callback_url, callback_token, success, download_url, log, deleted_rows, file_id):
-              """Send results back to Flask app"""
-              payload = {
-                  'file_id': file_id,
-                  'success': success,
-                  'download_url': download_url,
-                  'processing_log': log,
-                  'deleted_rows': deleted_rows
-              }
-              
-              headers = {
-                  'Content-Type': 'application/json',
-                  'Authorization': f'Bearer {callback_token}'
-              }
-              
+              payload = {'file_id': file_id, 'success': success, 'download_url': download_url,
+                         'processing_log': log, 'deleted_rows': deleted_rows}
+              headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {callback_token}'}
               try:
-                  response = requests.post(callback_url, json=payload, headers=headers, timeout=30)
-                  print(f"Callback sent: {response.status_code}")
-                  if response.status_code != 200:
-                      print(f"Callback error: {response.text}")
+                  r = requests.post(callback_url, json=payload, headers=headers, timeout=30)
+                  print(f"Callback sent: {r.status_code}")
+                  if r.status_code != 200: print(f"Callback error: {r.text}")
               except Exception as e:
                   print(f"Callback failed: {e}")
 
           def main():
               output_file = "output.xlsx"
-              
               callback_url = os.environ.get('CALLBACK_URL')
               callback_token = os.environ.get('CALLBACK_TOKEN')
               file_id = os.environ.get('FILE_ID')
-              
               print(f"Processing completed for file {file_id}")
-              
               if os.path.exists(output_file):
-                  file_size = os.path.getsize(output_file)
-                  print(f"Output file exists, size: {file_size} bytes")
-                  
-                  # Upload to GitHub release
-                  download_url = upload_to_github_release(output_file, file_id)
-                  
-                  if download_url:
-                      print(f"File uploaded: {download_url}")
-                      send_callback(callback_url, callback_token, True, download_url, 
-                                  ["LibreOffice processing completed", f"File size: {file_size} bytes"], 
-                                  0, file_id)
-                  else:
-                      print("Upload failed")
-                      send_callback(callback_url, callback_token, False, None, 
-                                  ["Processing completed but upload failed"], 0, file_id)
+                  sz = os.path.getsize(output_file)
+                  print(f"Output file exists, size: {sz} bytes")
+                  # No GH release here yet; just callback success
+                  send_callback(callback_url, callback_token, True, None,
+                               [f"LibreOffice processing completed", f"File size: {sz} bytes"], 0, file_id)
               else:
                   print("Output file not found")
-                  send_callback(callback_url, callback_token, False, None, 
-                              ["Output file not found after processing"], 0, file_id)
-
+                  send_callback(callback_url, callback_token, False, None,
+                               ["Output file not found after processing"], 0, file_id)
           if __name__ == "__main__":
               main()
           EOF
-
           python upload_and_callback.py
 
       - name: Upload processed file as artifact (backup)

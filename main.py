@@ -560,142 +560,102 @@ def process_file(file_id):
         return jsonify({'error': str(e)}), 500
 
 def generate_libreoffice_macro(original_filename, rows_to_delete_by_sheet):
-    """Generate LibreOffice Calc macro to delete specified rows without confirmations"""
-    
+    """Generate a LibreOffice Calc macro that deletes rows and exits cleanly in headless CI."""
+
     macro_header = f'''REM Macro generated to clean up: {original_filename}
-REM This macro will delete rows where columns F, G, H, and I are all empty or zero
 REM Generated on: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC
+Option Explicit
+
+Private Sub _SafeSetEnable(oController As Object, enabled As Boolean)
+    On Error Resume Next
+    If Not IsNull(oController) Then
+        Dim oFrame, oWin
+        oFrame = oController.getFrame()
+        If Not IsNull(oFrame) Then
+            oWin = oFrame.getContainerWindow()
+            If Not IsNull(oWin) Then
+                oWin.setEnable(enabled)
+            End If
+        End If
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Sub _SaveAndQuit(oDoc As Object)
+    On Error Resume Next
+    If Not IsNull(oDoc) Then
+        oDoc.store                 ' save in place (keeps XLSX)
+        oDoc.close(True)           ' close without prompts
+    End If
+    StarDesktop.terminate          ' end soffice process
+    On Error GoTo 0
+End Sub
 
 Sub DeleteEmptyRows()
-    Dim oDoc As Object
-    Dim oSheet As Object
-    Dim oController As Object
-    Dim i As Long
+    On Error GoTo EH
+
+    Dim oDoc As Object, oController As Object, oSheet As Object
     Dim rowsDeleted As Long
-    
-    ' Get the current document and controller
     oDoc = ThisComponent
     oController = oDoc.getCurrentController()
-    
-    ' Disable screen updating for performance (LibreOffice syntax)
-    oController.getFrame().getContainerWindow().setEnable(False)
-    
-    ' Show initial message
-    Print "Starting row deletion process..."
-    Print "Processing {len(rows_to_delete_by_sheet)} sheet(s)..."
-    
     rowsDeleted = 0
+
+    _SafeSetEnable oController, False   ' ok in headless (no-op if not available)
 '''
 
+    # Build the per-sheet deletion body
     macro_body = ""
     for sheet_name, rows in rows_to_delete_by_sheet.items():
-        # Sort rows in descending order for deletion (delete from bottom up)
-        sorted_rows = sorted(rows, reverse=True)
-        
-        macro_body += f'''
-    ' Process sheet: {sheet_name}
-    Print "Processing sheet: {sheet_name} ({len(rows)} rows to delete)"
-    
-    ' Get sheet by name
-    If oDoc.Sheets.hasByName("{sheet_name}") Then
-        oSheet = oDoc.Sheets.getByName("{sheet_name}")
-        
-        ' Delete rows from bottom to top to maintain row numbers
-'''
-        
-        # Group consecutive rows for efficient deletion
+        sorted_rows = sorted(rows, reverse=True)  # delete bottom-up
+
+        # Compact consecutive runs for fewer removeByIndex calls
         row_groups = []
         if sorted_rows:
-            current_group = [sorted_rows[0]]
-            
-            for row in sorted_rows[1:]:
-                if row == current_group[-1] - 1:  # Consecutive row
-                    current_group.append(row)
+            grp = [sorted_rows[0]]
+            for r in sorted_rows[1:]:
+                if r == grp[-1] - 1:
+                    grp.append(r)
                 else:
-                    row_groups.append(current_group)
-                    current_group = [row]
-            row_groups.append(current_group)
-        
-        for group in row_groups:
-            start_row = min(group)
-            end_row = max(group)
-            count = len(group)
-            
-            macro_body += f'''        
-        ' Delete rows {start_row} to {end_row} ({count} row{"s" if count > 1 else ""})
-        oSheet.Rows.removeByIndex({start_row - 1}, {count})
-        rowsDeleted = rowsDeleted + {count}
-        Print "  ✓ Deleted {count} row{"s" if count > 1 else ""} starting at row {start_row}"
+                    row_groups.append(grp)
+                    grp = [r]
+            row_groups.append(grp)
+
+        macro_body += f'''
+    ' Process sheet: {sheet_name}
+    If oDoc.Sheets.hasByName("{sheet_name}") Then
+        oSheet = oDoc.Sheets.getByName("{sheet_name}")
 '''
-        
-        macro_body += f'''        
-        Print "  → Completed sheet '{sheet_name}'"
-    Else
-        Print "  ⚠ Warning: Sheet '{sheet_name}' not found"
-    End If
+
+        for grp in row_groups:
+            start_row = min(grp)
+            count = len(grp)
+            # LibreOffice Basic uses 0-based index for removeByIndex
+            macro_body += f'''        oSheet.Rows.removeByIndex({start_row - 1}, {count})
+        rowsDeleted = rowsDeleted + {count}
+'''
+
+        macro_body += f'''    End If
 '''
 
     macro_footer = '''
-    ' Re-enable screen updates
-    oController.getFrame().getContainerWindow().setEnable(True)
-    
-    ' Show completion message
-    Print "Process completed successfully!"
-    Print "Total rows deleted: " & rowsDeleted
-    
-    ' Final completion dialog
-    MsgBox "Row deletion completed!" & Chr(10) & Chr(10) & _
-           "✓ Total rows deleted: " & rowsDeleted & Chr(10) & _
-           "✓ All images and formatting preserved" & Chr(10) & Chr(10) & _
-           "Please save your file now (Ctrl+S).", _
-           64, "Process Complete"
-    
-End Sub
+    _SafeSetEnable oController, True
+    _SaveAndQuit oDoc
+    Exit Sub
 
-REM Silent version without dialogs:
-Sub DeleteEmptyRowsSilent()
-    Dim oDoc As Object
-    Dim oSheet As Object
-    Dim oController As Object
-    Dim rowsDeleted As Long
-    
-    ' Get document and disable screen updates
-    oDoc = ThisComponent
-    oController = oDoc.getCurrentController()
-    oController.getFrame().getContainerWindow().setEnable(False)
-    
-    rowsDeleted = 0
-''' + macro_body.replace('Print ', 'REM ') + '''
-    ' Re-enable screen
-    oController.getFrame().getContainerWindow().setEnable(True)
-    
-    ' Just print to console - no dialog
-    Print "Silent deletion completed. Rows deleted: " & rowsDeleted
-    
+EH:
+    ' Write a minimal error log to home dir (read by workflow)
+    On Error Resume Next
+    Dim f As Integer: f = FreeFile()
+    Open Environ("HOME") & "/macro.log" For Append As #f
+    Print #f, "Error " & Err & ": " & Error$ & " at " & Now
+    Close #f
+    _SafeSetEnable oController, True
+    _SaveAndQuit oDoc
 End Sub
-
-REM INSTRUCTIONS FOR USE:
-REM 
-REM Option 1 - With completion dialog (recommended):
-REM   1. Run "DeleteEmptyRows"
-REM   2. Watch progress in console (View -> Basic IDE if not visible)
-REM   3. One final confirmation when complete
-REM
-REM Option 2 - Completely silent:
-REM   1. Run "DeleteEmptyRowsSilent" 
-REM   2. No dialogs, just console output
-REM
-REM To run this macro:
-REM 1. Open your Excel file in LibreOffice Calc
-REM 2. Tools -> Macros -> Organize Macros -> LibreOffice Basic
-REM 3. Click "New" to create a new module
-REM 4. Replace the default code with this entire macro
-REM 5. Click the "Run" button or press F5
-REM 6. Choose DeleteEmptyRows or DeleteEmptyRowsSilent
-REM 7. Save your file when complete (File -> Save or Ctrl+S)
 '''
 
     return macro_header + macro_body + macro_footer
+
 def generate_instructions(original_filename, total_rows, sheet_names):
     """Generate step-by-step instructions for using the macro"""
     
