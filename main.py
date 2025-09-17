@@ -881,37 +881,44 @@ def debug_storage():
         return jsonify({'error': str(e)}), 500
     
 def fix_private_key_format(raw_key):
-    """Fix private key format regardless of how it's stored"""
+    raw_key = os.getenv('GITHUB_PRIVATE_KEY', '')
     
-    # Step 1: Handle different newline representations
-    if '\\n' in raw_key:
-        # cPanel stored with literal \n
-        key = raw_key.replace('\\n', '\n')
-    else:
-        key = raw_key
+    # Step by step debugging
+    step1 = raw_key.replace('\\n', '\n') if '\\n' in raw_key else raw_key
     
-    # Step 2: Extract just the base64 content
     begin_marker = '-----BEGIN RSA PRIVATE KEY-----'
     end_marker = '-----END RSA PRIVATE KEY-----'
     
-    # Find the actual key content between markers
-    if begin_marker in key and end_marker in key:
-        start_idx = key.find(begin_marker) + len(begin_marker)
-        end_idx = key.find(end_marker)
-        content = key[start_idx:end_idx]
+    has_markers = begin_marker in step1 and end_marker in step1
+    
+    if has_markers:
+        start_idx = step1.find(begin_marker) + len(begin_marker)
+        end_idx = step1.find(end_marker)
+        content = step1[start_idx:end_idx]
+        clean_content = ''.join(content.split())
+        
+        # Build result
+        lines = [begin_marker]
+        for i in range(0, len(clean_content), 64):
+            lines.append(clean_content[i:i+64])
+        lines.append(end_marker)
+        
+        result = '\n'.join(lines)
+        
+        return jsonify({
+            'raw_key_length': len(raw_key),
+            'step1_has_newlines': '\n' in step1,
+            'has_markers': has_markers,
+            'content_length': len(content),
+            'clean_content_length': len(clean_content),
+            'result_line_count': len(result.split('\n')),
+            'clean_content_preview': clean_content[:100]
+        })
     else:
-        return raw_key  # Return as-is if no markers found
-    
-    # Step 3: Clean the content - remove all whitespace
-    clean_content = ''.join(content.split())
-    
-    # Step 4: Rebuild with proper 64-character lines
-    lines = [begin_marker]
-    for i in range(0, len(clean_content), 64):
-        lines.append(clean_content[i:i+64])
-    lines.append(end_marker)
-    
-    return '\n'.join(lines)
+        return jsonify({
+            'error': 'No RSA markers found',
+            'raw_key_preview': raw_key[:100]
+        })
 
 class GitHubAppAuth:
     def __init__(self):
