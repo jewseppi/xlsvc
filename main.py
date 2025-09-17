@@ -917,6 +917,22 @@ class GitHubAppAuth:
 
         # Fix the key format automatically
         raw_key = os.getenv('GITHUB_PRIVATE_KEY', '')
+    
+        # Look at the first 200 characters to see the actual format
+        first_200 = raw_key[:200]
+        
+        # Check for different types of newline representations
+        checks = {
+            'total_length': len(raw_key),
+            'first_200_chars': first_200,
+            'contains_literal_backslash_n': '\\n' in raw_key,
+            'contains_actual_newline': '\n' in raw_key,
+            'contains_carriage_return': '\r' in raw_key,
+            'char_codes_first_100': [ord(c) for c in raw_key[:100]]
+        }
+        
+        return jsonify(checks)
+
         self.private_key = fix_private_key_format(raw_key)
 
         self.installation_id = os.getenv('GITHUB_INSTALLATION_ID')
