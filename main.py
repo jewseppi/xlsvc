@@ -966,6 +966,106 @@ def test_github_auth():
             'traceback': traceback.format_exc()
         }), 500
     
+@app.route('/api/test-dispatch', methods=['POST'])
+@jwt_required()
+def test_dispatch():
+    """Test GitHub repository dispatch specifically"""
+    try:
+        print("DEBUG: Testing GitHub repository dispatch...")
+        
+        # Get GitHub token
+        github_auth = GitHubAppAuth()
+        github_token = github_auth.get_installation_token()
+        github_repo = os.getenv('GITHUB_REPO', 'jewseppi/xlsvc')
+        
+        print(f"DEBUG: Using repo: {github_repo}")
+        print(f"DEBUG: Token length: {len(github_token)}")
+        
+        # Test payload - minimal test dispatch
+        test_payload = {
+            "event_type": "test-connection",
+            "client_payload": {
+                "test": True,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        }
+        
+        headers = {
+            'Authorization': f'Bearer {github_token}',
+            'Accept': 'application/vnd.github.v3+json',
+            'Content-Type': 'application/json',
+            'User-Agent': 'Excel-Processor-App/1.0'
+        }
+        
+        dispatch_url = f'https://api.github.com/repos/{github_repo}/dispatches'
+        print(f"DEBUG: Dispatch URL: {dispatch_url}")
+        print(f"DEBUG: Headers: {headers}")
+        print(f"DEBUG: Payload: {test_payload}")
+        
+        # First, check if the repo exists and we have access
+        repo_url = f'https://api.github.com/repos/{github_repo}'
+        repo_response = requests.get(repo_url, headers=headers, timeout=10)
+        print(f"DEBUG: Repo check - Status: {repo_response.status_code}")
+        
+        if repo_response.status_code != 200:
+            return jsonify({
+                'status': 'error',
+                'error': 'Cannot access repository',
+                'repo_status': repo_response.status_code,
+                'repo_response': repo_response.text
+            }), 400
+        
+        # Try the dispatch
+        response = requests.post(
+            dispatch_url,
+            headers=headers,
+            json=test_payload,
+            timeout=30
+        )
+        
+        print(f"DEBUG: Dispatch response status: {response.status_code}")
+        print(f"DEBUG: Dispatch response headers: {dict(response.headers)}")
+        print(f"DEBUG: Dispatch response text: {response.text}")
+        
+        # GitHub API permissions check
+        if response.status_code == 403:
+            # Check what permissions we actually have
+            permissions_url = f'https://api.github.com/repos/{github_repo}/installation'
+            perm_response = requests.get(permissions_url, headers=headers, timeout=10)
+            
+            print(f"DEBUG: Permissions check status: {perm_response.status_code}")
+            if perm_response.status_code == 200:
+                perm_data = perm_response.json()
+                print(f"DEBUG: Installation permissions: {perm_data}")
+            
+        result = {
+            'status': 'success' if response.status_code == 204 else 'error',
+            'dispatch_status': response.status_code,
+            'dispatch_response': response.text,
+            'dispatch_headers': dict(response.headers),
+            'expected_status': 204,
+            'repo_access': True,
+            'github_repo': github_repo,
+            'test_payload': test_payload
+        }
+        
+        if response.status_code == 204:
+            result['message'] = 'Repository dispatch successful'
+        else:
+            result['error'] = f'Dispatch failed with status {response.status_code}'
+            
+        return jsonify(result), 200 if response.status_code == 204 else 400
+        
+    except Exception as e:
+        print(f"DEBUG: Test dispatch error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
 class GitHubAppAuth:
     def __init__(self):
         self.app_id = os.getenv('GITHUB_APP_ID')
