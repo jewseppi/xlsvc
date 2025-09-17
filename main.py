@@ -961,13 +961,13 @@ def process_file_automated(file_id):
             timeout=10
         )
 
-        return jsonify({
+        print(jsonify({
             'debug': 'Token permissions test',
             'repo_access': test_response.status_code,
             'permissions_access': permissions_response.status_code,
             'repo_response': test_response.json() if test_response.status_code == 200 else test_response.text,
             'permissions_response': permissions_response.json() if permissions_response.status_code == 200 else permissions_response.text
-        }), 200
+        }), 200)
         
         # Create job ID and callback token
         job_id = secrets.token_urlsafe(16)
