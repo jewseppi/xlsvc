@@ -923,23 +923,6 @@ class GitHubAppAuth:
 @app.route('/api/process-automated/<int:file_id>', methods=['POST'])
 @jwt_required()
 def process_file_automated(file_id):
-    try:
-        github_auth = GitHubAppAuth()
-        
-        # Test key format
-        private_key = os.getenv('GITHUB_PRIVATE_KEY', '').replace('\\n', '\n')
-        
-        return jsonify({
-            'key_starts_with': private_key[:50],
-            'key_ends_with': private_key[-50:],
-            'has_begin_marker': '-----BEGIN RSA PRIVATE KEY-----' in private_key,
-            'has_end_marker': '-----END RSA PRIVATE KEY-----' in private_key,
-            'key_lines': len(private_key.split('\n'))
-        })
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    
     """Trigger GitHub Actions processing using GitHub App authentication"""
     
     try:
