@@ -24,10 +24,20 @@ jobs:
           pip install requests
 
       - name: Download Excel file
+        env:
+          FILE_URL: ${{ github.event.client_payload.file_url }}
         run: |
-          echo "Downloading file from: ${{ github.event.client_payload.file_url }}"
-          curl -L -o input.xlsx "${{ github.event.client_payload.file_url }}"
+          echo "Downloading file from: $FILE_URL"
+
+          # Simple download - token is already in the URL as query parameter
+          curl -L \
+            -H "User-Agent: GitHub-Actions-Excel-Processor" \
+            -o input.xlsx \
+            "$FILE_URL"
+
+          echo "Download completed. File details:"
           ls -la input.xlsx
+          file input.xlsx
 
       - name: Get macro from Flask API
         env:

@@ -1346,7 +1346,7 @@ def process_file_automated(file_id):
             "event_type": "process-excel",
             "client_payload": {
                 "file_id": str(file_id),
-                "file_url": f"{base_url}/api/download-with-token/{file_id}",
+                "file_url": f"{base_url}/api/download-with-token/{file_id}?token={download_token}",
                 "download_token": download_token,
                 "callback_url": f"{base_url}/api/processing-callback",
                 "callback_token": callback_token
