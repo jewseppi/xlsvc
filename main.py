@@ -884,6 +884,10 @@ def debug_storage():
 @jwt_required()
 def process_file_automated(file_id):
     """Trigger GitHub Actions processing"""
+    print(f"DEBUG: Starting automated processing for file {file_id}")
+    print(f"DEBUG: GITHUB_TOKEN exists: {bool(os.getenv('GITHUB_TOKEN'))}")
+    print(f"DEBUG: GITHUB_REPO: {os.getenv('GITHUB_REPO')}")
+
     try:
         current_user_email = get_jwt_identity()
         
@@ -964,7 +968,10 @@ def process_file_automated(file_id):
             }), 500
             
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        print(f"DEBUG: Exception in process_file_automated: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
 @app.route('/api/processing-callback', methods=['POST'])
 def processing_callback():
