@@ -880,45 +880,171 @@ def debug_storage():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     
+@app.route('/api/test-github', methods=['GET'])
+@jwt_required()
+def test_github_auth():
+    """Test GitHub App authentication"""
+    try:
+        print("DEBUG: Testing GitHub App authentication...")
+        
+        # Check environment variables
+        app_id = os.getenv('GITHUB_APP_ID')
+        private_key = os.getenv('GITHUB_PRIVATE_KEY', '').replace('\\n', '\n')
+        installation_id = os.getenv('GITHUB_INSTALLATION_ID')
+        github_repo = os.getenv('GITHUB_REPO', 'jewseppi/xlsvc')
+        
+        env_status = {
+            'app_id': bool(app_id),
+            'private_key': bool(private_key),
+            'installation_id': bool(installation_id),
+            'github_repo': github_repo
+        }
+        
+        print(f"DEBUG: Environment variables: {env_status}")
+        
+        if not all([app_id, private_key, installation_id]):
+            return jsonify({
+                'status': 'error',
+                'error': 'Missing required environment variables',
+                'env_status': env_status
+            }), 400
+        
+        # Test GitHub App authentication
+        github_auth = GitHubAppAuth()
+        
+        # Test JWT generation
+        app_token = github_auth.get_app_token()
+        print(f"DEBUG: Generated app token: {app_token[:50]}...")
+        
+        # Test installation token
+        installation_token = github_auth.get_installation_token()
+        print(f"DEBUG: Generated installation token: {installation_token[:50]}...")
+        
+        # Test repository access
+        headers = {
+            'Authorization': f'Bearer {installation_token}',
+            'Accept': 'application/vnd.github.v3+json',
+            'User-Agent': 'Excel-Processor-App/1.0'
+        }
+        
+        # Check if we can access the repository
+        repo_url = f'https://api.github.com/repos/{github_repo}'
+        print(f"DEBUG: Testing repo access: {repo_url}")
+        
+        repo_response = requests.get(repo_url, headers=headers, timeout=10)
+        print(f"DEBUG: Repo access response: {repo_response.status_code}")
+        
+        if repo_response.status_code == 200:
+            repo_data = repo_response.json()
+            return jsonify({
+                'status': 'success',
+                'message': 'GitHub App authentication working',
+                'env_status': env_status,
+                'repo_access': True,
+                'repo_name': repo_data.get('full_name'),
+                'repo_private': repo_data.get('private'),
+                'app_token_length': len(app_token),
+                'installation_token_length': len(installation_token)
+            }), 200
+        else:
+            return jsonify({
+                'status': 'error',
+                'error': 'Cannot access repository',
+                'env_status': env_status,
+                'repo_response_code': repo_response.status_code,
+                'repo_response_text': repo_response.text
+            }), 400
+            
+    except Exception as e:
+        print(f"DEBUG: GitHub test error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+    
 class GitHubAppAuth:
     def __init__(self):
         self.app_id = os.getenv('GITHUB_APP_ID')
         self.private_key = os.getenv('GITHUB_PRIVATE_KEY', '').replace('\\n', '\n')
         self.installation_id = os.getenv('GITHUB_INSTALLATION_ID')
         
+        # Validate required environment variables
+        if not self.app_id:
+            raise ValueError("GITHUB_APP_ID environment variable is required")
+        if not self.private_key:
+            raise ValueError("GITHUB_PRIVATE_KEY environment variable is required")
+        if not self.installation_id:
+            raise ValueError("GITHUB_INSTALLATION_ID environment variable is required")
+            
+        print(f"DEBUG: GitHubAppAuth initialized - App ID: {self.app_id}, Installation: {self.installation_id}")
+        
     def get_app_token(self):
         """Generate JWT token for GitHub App"""
-        now = int(time.time())
-        payload = {
-            'iat': now,
-            'exp': now + 600,  # 10 minutes
-            'iss': self.app_id
-        }
-        return jwt_lib.encode(payload, self.private_key, algorithm='RS256')
+        try:
+            import jwt as jwt_lib
+            
+            now = int(time.time())
+            payload = {
+                'iat': now,
+                'exp': now + 600,  # 10 minutes
+                'iss': self.app_id
+            }
+            
+            print(f"DEBUG: JWT payload: {payload}")
+            print(f"DEBUG: Private key first 100 chars: {self.private_key[:100]}")
+            
+            # Try to encode the JWT
+            token = jwt_lib.encode(payload, self.private_key, algorithm='RS256')
+            print(f"DEBUG: Generated JWT token: {token[:50]}...")
+            
+            return token
+            
+        except Exception as e:
+            print(f"DEBUG: JWT encoding error: {str(e)}")
+            print(f"DEBUG: Private key format check:")
+            print(f"  - Starts with -----BEGIN: {self.private_key.startswith('-----BEGIN')}")
+            print(f"  - Contains PRIVATE KEY: {'PRIVATE KEY' in self.private_key}")
+            print(f"  - Ends with -----END: {'-----END' in self.private_key}")
+            print(f"  - Length: {len(self.private_key)}")
+            raise Exception(f"Failed to generate JWT token: {str(e)}")
     
     def get_installation_token(self):
         """Get installation access token"""
-        app_token = self.get_app_token()
-        
-        headers = {
-            'Authorization': f'Bearer {app_token}',
-            'Accept': 'application/vnd.github.v3+json'
-        }
-        
-        print(f"DEBUG: Requesting token for installation {self.installation_id}")
-        
-        response = requests.post(
-            f'https://api.github.com/app/installations/{self.installation_id}/access_tokens',
-            headers=headers
-        )
-        
-        print(f"DEBUG: Installation token response: {response.status_code}")
-        print(f"DEBUG: Response body: {response.text}")
-        
-        if response.status_code == 201:
-            return response.json()['token']
-        else:
-            raise Exception(f"Failed to get installation token: {response.status_code} {response.text}")
+        try:
+            app_token = self.get_app_token()
+            
+            headers = {
+                'Authorization': f'Bearer {app_token}',
+                'Accept': 'application/vnd.github.v3+json',
+                'User-Agent': 'Excel-Processor-App/1.0'
+            }
+            
+            url = f'https://api.github.com/app/installations/{self.installation_id}/access_tokens'
+            print(f"DEBUG: Requesting installation token from: {url}")
+            print(f"DEBUG: Headers: {headers}")
+            
+            response = requests.post(url, headers=headers, timeout=10)
+            
+            print(f"DEBUG: Installation token response: {response.status_code}")
+            print(f"DEBUG: Response headers: {dict(response.headers)}")
+            print(f"DEBUG: Response body: {response.text}")
+            
+            if response.status_code == 201:
+                token_data = response.json()
+                return token_data['token']
+            else:
+                raise Exception(f"Failed to get installation token: {response.status_code} {response.text}")
+                
+        except requests.exceptions.RequestException as e:
+            print(f"DEBUG: Network error getting installation token: {str(e)}")
+            raise Exception(f"Network error: {str(e)}")
+        except Exception as e:
+            print(f"DEBUG: Error getting installation token: {str(e)}")
+            raise
         
 @app.route('/api/process-automated/<int:file_id>', methods=['POST'])
 @jwt_required()
@@ -928,12 +1054,19 @@ def process_file_automated(file_id):
 
     try:
         current_user_email = get_jwt_identity()
+        print(f"DEBUG: User: {current_user_email}")
         
         # Get file info and verify ownership
         conn = get_db()
         user = conn.execute(
             'SELECT id FROM users WHERE email = ?', (current_user_email,)
         ).fetchone()
+        
+        if not user:
+            print("DEBUG: User not found in database")
+            return jsonify({'error': 'User not found'}), 404
+        
+        print(f"DEBUG: User ID: {user['id']}")
         
         file_info = conn.execute(
             '''SELECT f.* FROM files f
@@ -942,24 +1075,32 @@ def process_file_automated(file_id):
         ).fetchone()
         
         if not file_info:
+            print("DEBUG: File not found or not owned by user")
             return jsonify({'error': 'File not found'}), 404
+            
+        print(f"DEBUG: File found: {file_info['original_filename']}")
+        
+        # Check if file exists on disk
+        input_path = os.path.join(app.config['UPLOAD_FOLDER'], file_info['stored_filename'])
+        if not os.path.exists(input_path):
+            print(f"DEBUG: File not found on disk: {input_path}")
+            return jsonify({'error': 'File not found on disk'}), 404
         
         # Analyze the file first to generate macro
-        input_path = os.path.join(app.config['UPLOAD_FOLDER'], file_info['stored_filename'])
+        print("DEBUG: Starting file analysis...")
         rows_to_delete_by_sheet = analyze_excel_file(input_path)
         
         if not rows_to_delete_by_sheet:
+            print("DEBUG: No rows to delete found")
             return jsonify({'message': 'No rows to delete'}), 200
         
-        # Generate macro content
-        macro_content = generate_libreoffice_macro(
-            file_info['original_filename'], 
-            rows_to_delete_by_sheet
-        )
+        print(f"DEBUG: Found rows to delete in {len(rows_to_delete_by_sheet)} sheets")
         
         # Create job ID and callback token
         job_id = secrets.token_urlsafe(16)
         callback_token = secrets.token_urlsafe(32)
+        
+        print(f"DEBUG: Generated job_id: {job_id}")
         
         # Store job in database
         conn.execute(
@@ -970,50 +1111,72 @@ def process_file_automated(file_id):
         conn.commit()
         conn.close()
         
-        # Get GitHub token using App authentication
-        github_auth = GitHubAppAuth()
-
-        print(f"DEBUG: App ID: {github_auth.app_id}")
-        print(f"DEBUG: Installation ID: {github_auth.installation_id}")
-        print(f"DEBUG: Private key length: {len(github_auth.private_key) if github_auth.private_key else 'None'}")
-
-        github_token = github_auth.get_installation_token()
-        github_repo = os.getenv('GITHUB_REPO', 'jewseppi/xlsvc')
-
-        print(f"DEBUG: Got installation token: {github_token[:20]}...")
-
-        # Then the dispatch call
-        print(f"DEBUG: Dispatching to: https://api.github.com/repos/{github_repo}/dispatches")
-
+        print("DEBUG: Job stored in database")
         
-        # Prepare GitHub Actions payload - match your workflow expectations
+        # Check environment variables
+        app_id = os.getenv('GITHUB_APP_ID')
+        private_key = os.getenv('GITHUB_PRIVATE_KEY', '').replace('\\n', '\n')
+        installation_id = os.getenv('GITHUB_INSTALLATION_ID')
+        github_repo = os.getenv('GITHUB_REPO', 'jewseppi/xlsvc')
+        
+        print(f"DEBUG: App ID: {app_id}")
+        print(f"DEBUG: Installation ID: {installation_id}")
+        print(f"DEBUG: GitHub Repo: {github_repo}")
+        print(f"DEBUG: Private key length: {len(private_key) if private_key else 'None'}")
+        print(f"DEBUG: Private key starts with: {private_key[:50] if private_key else 'None'}...")
+        
+        if not app_id or not private_key or not installation_id:
+            print("DEBUG: Missing required environment variables")
+            return jsonify({
+                'error': 'GitHub App configuration missing',
+                'details': {
+                    'app_id': bool(app_id),
+                    'private_key': bool(private_key),
+                    'installation_id': bool(installation_id)
+                }
+            }), 500
+        
+        # Get GitHub token using App authentication
+        print("DEBUG: Initializing GitHub auth...")
+        github_auth = GitHubAppAuth()
+        
+        print("DEBUG: Getting installation token...")
+        github_token = github_auth.get_installation_token()
+        print(f"DEBUG: Got installation token: {github_token[:20]}...")
+        
+        # Prepare GitHub Actions payload
         base_url = request.host_url.rstrip('/')
         github_payload = {
             "event_type": "process-excel",
             "client_payload": {
                 "file_id": str(file_id),
-                "file_url": f"{base_url}/api/download/{file_id}",  # Your workflow expects 'file_url'
+                "file_url": f"{base_url}/api/download/{file_id}",
                 "callback_url": f"{base_url}/api/processing-callback",
                 "callback_token": callback_token
             }
         }
         
+        print(f"DEBUG: GitHub payload: {github_payload}")
+        
         headers = {
-            'Authorization': f'Bearer {github_token}',  # Use Bearer with installation token
+            'Authorization': f'Bearer {github_token}',
             'Accept': 'application/vnd.github.v3+json',
             'Content-Type': 'application/json'
         }
         
-        print(f"DEBUG: Dispatching to: https://api.github.com/repos/{github_repo}/dispatches")
+        dispatch_url = f'https://api.github.com/repos/{github_repo}/dispatches'
+        print(f"DEBUG: Dispatching to: {dispatch_url}")
         
         response = requests.post(
-            f'https://api.github.com/repos/{github_repo}/dispatches',
+            dispatch_url,
             headers=headers,
             json=github_payload,
             timeout=30
         )
         
         print(f"DEBUG: GitHub API response: {response.status_code}")
+        print(f"DEBUG: Response headers: {dict(response.headers)}")
+        print(f"DEBUG: Response text: {response.text}")
         
         if response.status_code == 204:
             return jsonify({
@@ -1027,14 +1190,18 @@ def process_file_automated(file_id):
             return jsonify({
                 'error': 'Failed to start GitHub Actions processing',
                 'details': response.text,
-                'status_code': response.status_code
+                'status_code': response.status_code,
+                'headers': dict(response.headers)
             }), 500
             
     except Exception as e:
         print(f"DEBUG: Exception in process_file_automated: {str(e)}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
     
 @app.route('/api/processing-callback', methods=['POST'])
 def processing_callback():
