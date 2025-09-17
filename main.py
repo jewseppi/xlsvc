@@ -880,10 +880,39 @@ def debug_storage():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     
+def fix_private_key_format(key_string):
+    """Convert single-line private key to proper multi-line format"""
+    # Remove existing newlines and extra spaces
+    key_string = key_string.replace('\\n', '').replace('\n', '').strip()
+    
+    # Extract the content between BEGIN and END markers
+    begin_marker = '-----BEGIN RSA PRIVATE KEY-----'
+    end_marker = '-----END RSA PRIVATE KEY-----'
+    
+    if begin_marker in key_string and end_marker in key_string:
+        # Find the actual key content
+        start = key_string.find(begin_marker) + len(begin_marker)
+        end = key_string.find(end_marker)
+        key_content = key_string[start:end].strip()
+        
+        # Break into 64-character lines
+        lines = [begin_marker]
+        for i in range(0, len(key_content), 64):
+            lines.append(key_content[i:i+64])
+        lines.append(end_marker)
+        
+        return '\n'.join(lines)
+    
+    return key_string
+
 class GitHubAppAuth:
     def __init__(self):
         self.app_id = os.getenv('GITHUB_APP_ID')
-        self.private_key = os.getenv('GITHUB_PRIVATE_KEY', '').replace('\\n', '\n')
+
+        # Fix the key format automatically
+        raw_key = os.getenv('GITHUB_PRIVATE_KEY', '')
+        self.private_key = fix_private_key_format(raw_key)
+
         self.installation_id = os.getenv('GITHUB_INSTALLATION_ID')
         
     def get_app_token(self):
