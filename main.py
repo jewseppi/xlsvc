@@ -948,6 +948,27 @@ def process_file_automated(file_id):
         github_token = github_auth.get_installation_token()
         github_repo = os.getenv('GITHUB_REPO', 'jewseppi/xlsvc')
         
+        # Test what this token can access
+        test_response = requests.get(
+            f'https://api.github.com/repos/{github_repo}',
+            headers={'Authorization': f'Bearer {github_token}'},
+            timeout=10
+        )
+
+        permissions_response = requests.get(
+            f'https://api.github.com/installation/repositories',
+            headers={'Authorization': f'Bearer {github_token}'},
+            timeout=10
+        )
+
+        return jsonify({
+            'debug': 'Token permissions test',
+            'repo_access': test_response.status_code,
+            'permissions_access': permissions_response.status_code,
+            'repo_response': test_response.json() if test_response.status_code == 200 else test_response.text,
+            'permissions_response': permissions_response.json() if permissions_response.status_code == 200 else permissions_response.text
+        }), 200
+        
         # Create job ID and callback token
         job_id = secrets.token_urlsafe(16)
         callback_token = secrets.token_urlsafe(32)
