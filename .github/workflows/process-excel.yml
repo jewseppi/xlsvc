@@ -71,17 +71,14 @@ jobs:
             exit 1
           fi
 
-      - name: Process Excel file with macro execution (with fallbacks)
+      - name: Process Excel file with macro execution (UNO only)
         run: |
           cat > process_with_macro.py << 'EOF'
           import subprocess, os, time, shutil, sys, tempfile, textwrap
 
-          TIMEOUT_M1 = 180   # Method 1 per-attempt timeout
-          TIMEOUT_M2 = 180   # Method 2 per-attempt timeout
-          TIMEOUT_M3 = 240   # UNO driver timeout
+          TIMEOUT_UNO = 420  # generous for big sheets
 
           def kill_soffice():
-              # Best-effort cleanup so we never hang the job between attempts
               for patt in ("soffice.bin", "soffice"):
                   try: subprocess.run(["pkill", "-f", patt], check=False)
                   except Exception: pass
@@ -92,12 +89,12 @@ jobs:
               with open(xcu, "w", encoding="utf-8") as f:
                   f.write("""<?xml version="1.0" encoding="UTF-8"?>
           <oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <item oor:path="/org.openoffice.Office.Common/Misc">
+          <item oor:path="/org.openoffice.Office.Common/Misc">
               <prop oor:name="FirstStartWizardCompleted" oor:type="xs:boolean"><value>true</value></prop>
-            </item>
-            <item oor:path="/org.openoffice.Office.Common/Security/Scripting">
+          </item>
+          <item oor:path="/org.openoffice.Office.Common/Security/Scripting">
               <prop oor:name="MacroSecurityLevel" oor:type="xs:int"><value>0</value></prop>
-            </item>
+          </item>
           </oor:items>
           """)
               print(f"Wrote {xcu}")
@@ -116,13 +113,13 @@ jobs:
               script_xlb = os.path.join(basic_root, "script.xlb")
               dialog_xlb = os.path.join(basic_root, "dialog.xlb")
               for path, payload in [
-                (script_xlb, """<?xml version="1.0" encoding="UTF-8"?>
+              (script_xlb, """<?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">
           <library:library xmlns:library="http://openoffice.org/2000/library" library:name="Standard" library:readonly="false" library:passwordprotected="false">
-            <library:element library:name="Module1"/>
+          <library:element library:name="Module1"/>
           </library:library>
           """),
-                (dialog_xlb, """<?xml version="1.0" encoding="UTF-8"?>
+              (dialog_xlb, """<?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">
           <library:library xmlns:library="http://openoffice.org/2000/library" library:name="Standard" library:readonly="false" library:passwordprotected="false">
           </library:library>
@@ -137,18 +134,6 @@ jobs:
               print("Starting Xvfb...")
               return subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1024x768x24"],
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-          def method_cli(profile_uri, env, output_path, macro_uri, timeout):
-              cmd = [
-                  "libreoffice",
-                  f"-env:UserInstallation={profile_uri}",
-                  "--headless", "--nologo", "--norestore", "--nodefault",
-                  "--calc",
-                  output_path,
-                  macro_uri,
-              ]
-              print("Command:", " ".join(cmd))
-              return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
 
           def method_uno(profile_uri, env, output_path, timeout):
               """Start a listening soffice and invoke macro via UNO (Python-UNO)."""
@@ -166,7 +151,7 @@ jobs:
 
                   OUTPUT_URL = pathlib.Path(r{output_path!r}).resolve().as_uri()
 
-                  def connect(max_attempts=60, delay=0.5):
+                  def connect(max_attempts=80, delay=0.5):
                       local_ctx = uno.getComponentContext()
                       resolver = local_ctx.ServiceManager.createInstanceWithContext(
                           'com.sun.star.bridge.UnoUrlResolver', local_ctx)
@@ -213,7 +198,8 @@ jobs:
                   uno_path = tf.name
 
               try:
-                  r = subprocess.run(["python3", uno_path], capture_output=True, text=True, env=env, timeout=timeout)
+                  # IMPORTANT: use system python where python3-uno is installed
+                  r = subprocess.run(["/usr/bin/python3", uno_path], capture_output=True, text=True, env=env, timeout=timeout)
                   if r.stdout: print(r.stdout)
                   if r.stderr: print(r.stderr)
                   return r.returncode
@@ -225,6 +211,13 @@ jobs:
                       try: soff.kill()
                       except Exception: pass
 
+          def _check_output():
+              if os.path.exists("output.xlsx") and os.path.getsize("output.xlsx") > 1000:
+                  print(f"Output file size after macro: {os.path.getsize('output.xlsx')} bytes")
+                  return True
+              print("✗ Output file missing/too small")
+              return False
+
           def execute_macro_via_libreoffice():
               # Sanity checks
               if not os.path.exists('input.xlsx'):
@@ -234,7 +227,6 @@ jobs:
               if not os.path.exists('process_macro.bas'):
                   print("ERROR: process_macro.bas not found"); return False
 
-              # Work on a copy
               shutil.copy2('input.xlsx', 'output.xlsx')
               print("Copied input to output file")
 
@@ -250,45 +242,15 @@ jobs:
               xvfb = start_xvfb(); time.sleep(2)
               env = os.environ.copy(); env["DISPLAY"] = ":99"
 
-              output_path = os.path.abspath("output.xlsx")
-
-              # --- Method 1 ---
-              print("Executing Method 1 (user-profile macro)…")
+              # UNO only
+              print("Executing UNO method…")
               try:
-                  r1 = method_cli(profile_uri, env, output_path, "macro:///Standard.Module1.DeleteEmptyRows", TIMEOUT_M1)
-                  print("Method 1 exit:", r1.returncode)
-                  if r1.stdout: print("STDOUT:", r1.stdout)
-                  if r1.stderr: print("STDERR:", r1.stderr)
-                  if r1.returncode == 0:
-                      return _check_output()
-              except subprocess.TimeoutExpired:
-                  print("Method 1 timed out.")
-              finally:
-                  kill_soffice()
-
-              # --- Method 2 ---
-              print("Method 1 failed, trying Method 2 (file-scoped macro)…")
-              try:
-                  r2 = method_cli(profile_uri, env, output_path, "macro://./Standard.Module1.DeleteEmptyRows", TIMEOUT_M2)
-                  print("Method 2 exit:", r2.returncode)
-                  if r2.stdout: print("STDOUT:", r2.stdout)
-                  if r2.stderr: print("STDERR:", r2.stderr)
-                  if r2.returncode == 0:
-                      return _check_output()
-              except subprocess.TimeoutExpired:
-                  print("Method 2 timed out.")
-              finally:
-                  kill_soffice()
-
-              # --- Method 3 (UNO) ---
-              print("Method 2 failed, trying Method 3 (UNO driver)…")
-              try:
-                  code = method_uno(profile_uri, env, output_path, TIMEOUT_M3)
-                  print("Method 3 exit:", code)
+                  code = method_uno(profile_uri, env, os.path.abspath("output.xlsx"), TIMEOUT_UNO)
+                  print("UNO exit:", code)
                   if code == 0:
                       return _check_output()
               except subprocess.TimeoutExpired:
-                  print("Method 3 timed out.")
+                  print("UNO timed out.")
               finally:
                   kill_soffice()
                   try: xvfb.terminate(); xvfb.wait(timeout=5)
@@ -296,14 +258,7 @@ jobs:
                       try: xvfb.kill()
                       except Exception: pass
 
-              print("✗ All methods failed")
-              return False
-
-          def _check_output():
-              if os.path.exists("output.xlsx") and os.path.getsize("output.xlsx") > 1000:
-                  print(f"Output file size after macro: {os.path.getsize('output.xlsx')} bytes")
-                  return True
-              print("✗ Output file missing/too small")
+              print("✗ UNO failed")
               return False
 
           if __name__ == "__main__":
