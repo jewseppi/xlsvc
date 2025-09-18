@@ -23,41 +23,56 @@ jobs:
           sudo apt-get install -y libreoffice python3-uno xvfb
           pip install requests
 
-      - name: Download Excel file
+      - name: Download Excel file (robust)
         env:
           FILE_URL: ${{ github.event.client_payload.file_url }}
+        shell: bash
         run: |
+          set -euo pipefail
           echo "Downloading file from: $FILE_URL"
-          curl -L \
-            -H "User-Agent: GitHub-Actions-Excel-Processor" \
-            -o input.xlsx \
-            "$FILE_URL"
-          echo "Download completed. File details:"
-          ls -la input.xlsx
-          file input.xlsx
 
-      - name: Get macro from Flask API
-        env:
-          CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-          FILE_ID: ${{ github.event.client_payload.file_id }}
-        run: |
-          cat > get_macro.py << 'EOF'
-          import os, requests
-          callback_url = os.environ.get('CALLBACK_URL')
-          base_url = callback_url.replace('/api/processing-callback', '')
-          file_id = os.environ.get('FILE_ID')
-          print(f"Getting macro for file {file_id} from {base_url}")
-          r = requests.get(f"{base_url}/api/get-macro/{file_id}", timeout=30)
-          if r.status_code != 200:
-              print(f"Failed to get macro: {r.status_code} {r.text}")
-              raise SystemExit(1)
-          macro_data = r.json()
-          with open('process_macro.bas', 'w', encoding='utf-8') as f:
-              f.write(macro_data['macro_content'])
-          print("Macro downloaded successfully")
-          print(f"Macro filename: {macro_data.get('filename','unknown')}")
-          EOF
-          python get_macro.py
+          # Try 1: curl with retries (force HTTP/1.1 to dodge some proxies/CDNs)
+          if ! curl \
+              --http1.1 \
+              --fail \
+              --location \
+              --retry 7 \
+              --retry-delay 3 \
+              --retry-all-errors \
+              --speed-time 30 \
+              --speed-limit 10240 \
+              --max-time 1200 \
+              -H "User-Agent: GitHub-Actions-Excel-Processor" \
+              -o input.xlsx \
+              "$FILE_URL"
+          then
+          echo "curl failed, trying wget…"
+          # Try 2: wget with retries
+          if ! wget \
+              --tries=7 \
+              --waitretry=3 \
+              --retry-connrefused \
+              --no-verbose \
+              --header="User-Agent: GitHub-Actions-Excel-Processor" \
+              -O input.xlsx \
+              "$FILE_URL"
+          then
+              echo "Both curl and wget failed."
+              exit 1
+          fi
+          fi
+
+          echo "Download completed. File details:"
+          ls -la input.xlsx || true
+          file input.xlsx || true
+
+          # sanity check: require >= 1MB
+          sz=$(stat -c%s input.xlsx)
+          echo "Downloaded size: $sz bytes"
+          if [ "$sz" -lt 1048576 ]; then
+          echo "ERROR: Downloaded file too small."
+          exit 1
+          fi
 
       - name: Check downloaded file
         run: |
