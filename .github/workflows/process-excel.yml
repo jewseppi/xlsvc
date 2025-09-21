@@ -26,7 +26,6 @@ jobs:
       - name: Download Excel file (robust)
         env:
           FILE_URL: ${{ github.event.client_payload.file_url }}
-          MACRO_FILENAME: ${{ github.event.client_payload.macro_filename }}
         shell: bash
         run: |
           set -euo pipefail
@@ -86,6 +85,16 @@ jobs:
             hexdump -C input.xlsx | head -10
             exit 1
           fi
+
+      - name: Download macro file
+        env:
+          MACRO_URL: ${{ github.event.client_payload.macro_url }}
+          MACRO_FILENAME: ${{ github.event.client_payload.macro_filename }}
+        run: |
+          echo "Downloading macro: $MACRO_FILENAME from $MACRO_URL"
+          mkdir -p macros
+          curl -L -o "macros/$MACRO_FILENAME" "$MACRO_URL"
+          ls -la macros/
 
       - name: Process Excel file with macro execution (UNO only)
         run: |
@@ -235,36 +244,33 @@ jobs:
               return False
 
           def execute_macro_via_libreoffice():
-               macro_filename = os.environ.get('MACRO_FILENAME')
-
-               if not macro_filename:
-                  print("ERROR: No macro filename provided"); return False
+                # Get macro filename from environment
+                macro_filename = os.environ.get('MACRO_FILENAME')
                 
-               macro_file = os.path.join('macros', macro_filename)
-            
-               if not os.path.exists(macro_file):
-                  print(f"ERROR: Macro file not found: {macro_file}"); return False
+                if not macro_filename:
+                    print("ERROR: No macro filename provided"); return False
+                
+                macro_file = os.path.join('macros', macro_filename)
+                
+                if not os.path.exists(macro_file):
+                    print(f"ERROR: Macro file not found: {macro_file}"); return False
                 
                 print(f"Using macro file: {macro_file}")
                 
+                # Sanity checks
+                if not os.path.exists('input.xlsx'):
+                    print("ERROR: input.xlsx not found"); return False
+                if os.path.getsize('input.xlsx') < 1000:
+                    print("ERROR: Input file too small"); return False
+
+                shutil.copy2('input.xlsx', 'output.xlsx')
+                print("Copied input to output file")
+
               # Sanity checks
               if not os.path.exists('input.xlsx'):
                   print("ERROR: input.xlsx not found"); return False
               if os.path.getsize('input.xlsx') < 1000:
                   print("ERROR: Input file too small"); return False
-             
-              # Find macro file in macros folder
-              macro_file = None
-              if os.path.exists('macros'):
-                  for filename in os.listdir('macros'):
-                      if filename.startswith('macro_') and filename.endswith('.bas'):
-                          macro_file = os.path.join('macros', filename)
-                          break
-            
-              if not macro_file or not os.path.exists(macro_file):
-                  print("ERROR: No macro file found in macros/ folder"); return False
-            
-              print(f"Using macro file: {macro_file}")
 
               shutil.copy2('input.xlsx', 'output.xlsx')
               print("Copied input to output file")

@@ -1311,7 +1311,6 @@ def process_file_automated(file_id):
                 "download_token": download_token,
                 "callback_url": f"{base_url}/api/processing-callback",
                 "callback_token": callback_token,
-                'macro_filename': macro_file,
             }
         }
         
