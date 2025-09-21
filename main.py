@@ -1251,15 +1251,43 @@ def process_file_automated(file_id):
         
         print(f"DEBUG: Found rows to delete in {len(rows_to_delete_by_sheet)} sheets")
         
+        # Generate the macro content and save it
+        file_dict = dict(file_info)
+        macro_content = generate_libreoffice_macro(
+            file_dict['original_filename'], 
+            rows_to_delete_by_sheet
+        )
+        
+        # Save macro file
+        macro_filename = f"macro_{uuid.uuid4().hex[:8]}.bas"
+        macro_path = os.path.join(app.config['MACROS_FOLDER'], macro_filename)
+        
+        with open(macro_path, 'w', encoding='utf-8') as f:
+            f.write(macro_content)
+        
+        print(f"DEBUG: Generated macro file: {macro_filename}")
+        
+        # Record macro in database
+        macro_file_id = conn.execute(
+            '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type) 
+               VALUES (?, ?, ?, ?, ?, ?)''',
+            (file_dict['user_id'], f"Macro_{file_dict['original_filename']}.bas", 
+             macro_filename, os.path.getsize(macro_path), True, 'macro')
+        ).lastrowid
+        
+        print(f"DEBUG: Macro file saved with ID: {macro_file_id}")
+        
         # Create job ID and callback token
         job_id = secrets.token_urlsafe(16)
         callback_token = secrets.token_urlsafe(32)
         
-        # Generate download token for GitHub Actions (expires in 30 minutes)
+        # Generate download tokens for both original file and macro
         download_token = generate_download_token(file_id, user['id'], expires_in_minutes=30)
+        macro_download_token = generate_download_token(macro_file_id, user['id'], expires_in_minutes=30)
         
         print(f"DEBUG: Generated job_id: {job_id}")
         print(f"DEBUG: Generated download token: {download_token[:20]}...")
+        print(f"DEBUG: Generated macro download token: {macro_download_token[:20]}...")
         
         # Store job in database
         conn.execute(
@@ -1301,7 +1329,7 @@ def process_file_automated(file_id):
         github_token = github_auth.get_installation_token()
         print(f"DEBUG: Got installation token: {github_token[:20]}...")
         
-        # Prepare GitHub Actions payload with download token
+        # Prepare GitHub Actions payload with download tokens
         base_url = request.host_url.rstrip('/')
         github_payload = {
             "event_type": "process-excel",
@@ -1309,12 +1337,15 @@ def process_file_automated(file_id):
                 "file_id": str(file_id),
                 "file_url": f"{base_url}/api/download-with-token/{file_id}?token={download_token}",
                 "download_token": download_token,
+                "macro_url": f"{base_url}/api/download-with-token/{macro_file_id}?token={macro_download_token}",
+                "macro_filename": macro_filename,
                 "callback_url": f"{base_url}/api/processing-callback",
                 "callback_token": callback_token,
+                "job_id": job_id
             }
         }
         
-        print(f"DEBUG: GitHub payload prepared with download token")
+        print(f"DEBUG: GitHub payload prepared with macro filename: {macro_filename}")
         
         headers = {
             'Authorization': f'Bearer {github_token}',
@@ -1339,7 +1370,8 @@ def process_file_automated(file_id):
                 'message': 'Processing started via GitHub Actions',
                 'job_id': job_id,
                 'status': 'pending',
-                'estimated_time': '2-3 minutes'
+                'estimated_time': '2-3 minutes',
+                'macro_file_id': macro_file_id
             }), 202
         else:
             print(f"DEBUG: GitHub API error: {response.text}")
