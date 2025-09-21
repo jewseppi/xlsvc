@@ -129,16 +129,28 @@ jobs:
           def install_user_macro(macro_dir: str, macro_file: str):
               os.makedirs(macro_dir, exist_ok=True)
               module_path = os.path.join(macro_dir, "Module1.bas")
+              
+              # Read and write macro content
               with open(macro_file, 'r', encoding='utf-8') as f:
                   macro_content = f.read()
               with open(module_path, 'w', encoding='utf-8') as f:
                   f.write(macro_content)
               print(f"Wrote macro to: {module_path}")
+              
+              # Verify macro was written
+              if os.path.exists(module_path):
+                  print(f"✓ Macro file exists: {os.path.getsize(module_path)} bytes")
+              else:
+                  print(f"✗ Macro file missing: {module_path}")
+                  return False
 
               # Register library via script.xlb/dialog.xlb
               basic_root = os.path.dirname(macro_dir)  # .../user/basic
               script_xlb = os.path.join(basic_root, "script.xlb")
               dialog_xlb = os.path.join(basic_root, "dialog.xlb")
+              
+              print(f"Creating library files in: {basic_root}")
+              
               for path, payload in [
               (script_xlb, """<?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">
@@ -156,6 +168,15 @@ jobs:
                   with open(path, 'w', encoding='utf-8') as f:
                       f.write(payload)
                   print(f"Created {path}")
+              
+              # Debug: List all files created
+              print("Macro installation complete. Files created:")
+              for root, dirs, files in os.walk(basic_root):
+                  for file in files:
+                      full_path = os.path.join(root, file)
+                      print(f"  {full_path} ({os.path.getsize(full_path)} bytes)")
+              
+              return True
 
           def start_xvfb():
               print("Starting Xvfb...")
@@ -192,29 +213,63 @@ jobs:
                       raise RuntimeError('UNO server not ready')
 
                   def main():
+                      print("UNO script starting...")
+                      print(f"Output URL: {{OUTPUT_URL}}")
+                      
                       ctx = connect()
+                      print("Connected to LibreOffice UNO server")
+                      
                       smgr = ctx.ServiceManager
                       desktop = smgr.createInstanceWithContext('com.sun.star.frame.Desktop', ctx)
 
                       hidden = uno.createUnoStruct('com.sun.star.beans.PropertyValue')
                       hidden.Name = 'Hidden'; hidden.Value = True
                       doc = desktop.loadComponentFromURL(OUTPUT_URL, '_blank', 0, (hidden,))
+                      print("Document loaded")
 
-                      mspi = smgr.createInstanceWithContext(
-                          'com.sun.star.script.provider.MasterScriptProviderFactory', ctx)
-                      provider = mspi.createScriptProvider('')
-                      script = provider.getScript(
-                          'vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=user'
-                      )
-                      script.invoke((), (), ())
+                      try:
+                          # Get script provider and try to find the macro
+                          mspi = smgr.createInstanceWithContext(
+                              'com.sun.star.script.provider.MasterScriptProviderFactory', ctx)
+                          provider = mspi.createScriptProvider('')
+                          print("Script provider created")
+                          
+                          # Try to get the script
+                          script_uri = 'vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=user'
+                          print(f"Looking for script: {{script_uri}}")
+                          
+                          script = provider.getScript(script_uri)
+                          print("Script found, executing...")
+                          
+                          script.invoke((), (), ())
+                          print("Script executed successfully")
+                          
+                      except Exception as e:
+                          print(f"Script error: {{e}}")
+                          print(f"Error type: {{type(e)}}")
+                          # Try to list available scripts
+                          try:
+                              print("Available script locations:")
+                              browseNode = provider.browse(None)
+                              if browseNode.hasChildNodes():
+                                  children = browseNode.getChildNodes()
+                                  for i in range(children.getCount()):
+                                      child = children.getByIndex(i)
+                                      print(f"  - {{child.getName()}} ({{child.getType()}})")
+                          except Exception as browse_e:
+                              print(f"Could not browse scripts: {{browse_e}}")
+                          raise
 
                       try:
                           doc.store()
+                          print("Document saved")
                           doc.close(True)
+                          print("Document closed")
                       except Exception:
                           pass
 
                       desktop.terminate()
+                      print("LibreOffice terminated")
 
                   if __name__ == '__main__':
                       main()
@@ -276,9 +331,16 @@ jobs:
               profile_dir = os.path.abspath("./lo-profile")
               user_dir    = os.path.join(profile_dir, "user")
               macro_dir   = os.path.join(user_dir, "basic", "Standard")
+              
+              print(f"Setting up LibreOffice profile at: {profile_dir}")
               write_profile_prefs(user_dir)
-              install_user_macro(macro_dir, macro_file)
-              profile_uri = "file://" + profile_dir  # absolute path -> file:///...
+              
+              if not install_user_macro(macro_dir, macro_file):
+                  print("Failed to install macro")
+                  return False
+              
+              profile_uri = "file://" + profile_dir
+              print(f"Profile URI: {profile_uri}")
 
               # Xvfb (optional but harmless)
               xvfb = start_xvfb()
