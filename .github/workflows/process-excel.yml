@@ -97,6 +97,8 @@ jobs:
           ls -la macros/
 
       - name: Process Excel file with macro execution (UNO only)
+        env:
+          MACRO_FILENAME: ${{ github.event.client_payload.macro_filename }}
         run: |
           cat > process_with_macro.py << 'EOF'
           import subprocess, os, time, shutil, sys, tempfile, textwrap
@@ -244,33 +246,28 @@ jobs:
               return False
 
           def execute_macro_via_libreoffice():
-                # Get macro filename from environment
-                macro_filename = os.environ.get('MACRO_FILENAME')
-                
-                if not macro_filename:
-                    print("ERROR: No macro filename provided"); return False
-                
-                macro_file = os.path.join('macros', macro_filename)
-                
-                if not os.path.exists(macro_file):
-                    print(f"ERROR: Macro file not found: {macro_file}"); return False
-                
-                print(f"Using macro file: {macro_file}")
-                
-                # Sanity checks
-                if not os.path.exists('input.xlsx'):
-                    print("ERROR: input.xlsx not found"); return False
-                if os.path.getsize('input.xlsx') < 1000:
-                    print("ERROR: Input file too small"); return False
-
-                shutil.copy2('input.xlsx', 'output.xlsx')
-                print("Copied input to output file")
-
+              # Get macro filename from environment
+              macro_filename = os.environ.get('MACRO_FILENAME')
+              
+              if not macro_filename:
+                  print("ERROR: No macro filename provided")
+                  return False
+              
+              macro_file = os.path.join('macros', macro_filename)
+              
+              if not os.path.exists(macro_file):
+                  print(f"ERROR: Macro file not found: {macro_file}")
+                  return False
+              
+              print(f"Using macro file: {macro_file}")
+              
               # Sanity checks
               if not os.path.exists('input.xlsx'):
-                  print("ERROR: input.xlsx not found"); return False
+                  print("ERROR: input.xlsx not found")
+                  return False
               if os.path.getsize('input.xlsx') < 1000:
-                  print("ERROR: Input file too small"); return False
+                  print("ERROR: Input file too small")
+                  return False
 
               shutil.copy2('input.xlsx', 'output.xlsx')
               print("Copied input to output file")
@@ -284,8 +281,10 @@ jobs:
               profile_uri = "file://" + profile_dir  # absolute path -> file:///...
 
               # Xvfb (optional but harmless)
-              xvfb = start_xvfb(); time.sleep(2)
-              env = os.environ.copy(); env["DISPLAY"] = ":99"
+              xvfb = start_xvfb()
+              time.sleep(2)
+              env = os.environ.copy()
+              env["DISPLAY"] = ":99"
 
               # UNO only
               print("Executing UNO method…")
@@ -298,10 +297,14 @@ jobs:
                   print("UNO timed out.")
               finally:
                   kill_soffice()
-                  try: xvfb.terminate(); xvfb.wait(timeout=5)
+                  try: 
+                      xvfb.terminate()
+                      xvfb.wait(timeout=5)
                   except Exception:
-                      try: xvfb.kill()
-                      except Exception: pass
+                      try: 
+                          xvfb.kill()
+                      except Exception: 
+                          pass
 
               print("✗ UNO failed")
               return False
@@ -314,10 +317,12 @@ jobs:
               print("=" * 60)
               if ok:
                   print("✓ Processing completed successfully")
-                  print("=" * 60); sys.exit(0)
+                  print("=" * 60)
+                  sys.exit(0)
               else:
                   print("✗ Processing failed")
-                  print("=" * 60); sys.exit(1)
+                  print("=" * 60)
+                  sys.exit(1)
           EOF
 
           python process_with_macro.py
