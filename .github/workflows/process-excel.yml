@@ -26,6 +26,7 @@ jobs:
       - name: Download Excel file (robust)
         env:
           FILE_URL: ${{ github.event.client_payload.file_url }}
+          MACRO_FILENAME: ${{ github.event.client_payload.macro_filename }}
         shell: bash
         run: |
           set -euo pipefail
@@ -114,10 +115,10 @@ jobs:
           """)
               print(f"Wrote {xcu}")
 
-          def install_user_macro(macro_dir: str):
+          def install_user_macro(macro_dir: str, macro_file: str):
               os.makedirs(macro_dir, exist_ok=True)
               module_path = os.path.join(macro_dir, "Module1.bas")
-              with open('process_macro.bas', 'r', encoding='utf-8') as f:
+              with open(macro_file, 'r', encoding='utf-8') as f:
                   macro_content = f.read()
               with open(module_path, 'w', encoding='utf-8') as f:
                   f.write(macro_content)
@@ -234,13 +235,36 @@ jobs:
               return False
 
           def execute_macro_via_libreoffice():
+               macro_filename = os.environ.get('MACRO_FILENAME')
+
+               if not macro_filename:
+                  print("ERROR: No macro filename provided"); return False
+                
+               macro_file = os.path.join('macros', macro_filename)
+            
+               if not os.path.exists(macro_file):
+                  print(f"ERROR: Macro file not found: {macro_file}"); return False
+                
+                print(f"Using macro file: {macro_file}")
+                
               # Sanity checks
               if not os.path.exists('input.xlsx'):
                   print("ERROR: input.xlsx not found"); return False
               if os.path.getsize('input.xlsx') < 1000:
                   print("ERROR: Input file too small"); return False
-              if not os.path.exists('process_macro.bas'):
-                  print("ERROR: process_macro.bas not found"); return False
+             
+              # Find macro file in macros folder
+              macro_file = None
+              if os.path.exists('macros'):
+                  for filename in os.listdir('macros'):
+                      if filename.startswith('macro_') and filename.endswith('.bas'):
+                          macro_file = os.path.join('macros', filename)
+                          break
+            
+              if not macro_file or not os.path.exists(macro_file):
+                  print("ERROR: No macro file found in macros/ folder"); return False
+            
+              print(f"Using macro file: {macro_file}")
 
               shutil.copy2('input.xlsx', 'output.xlsx')
               print("Copied input to output file")
@@ -250,7 +274,7 @@ jobs:
               user_dir    = os.path.join(profile_dir, "user")
               macro_dir   = os.path.join(user_dir, "basic", "Standard")
               write_profile_prefs(user_dir)
-              install_user_macro(macro_dir)
+              install_user_macro(macro_dir, macro_file)
               profile_uri = "file://" + profile_dir  # absolute path -> file:///...
 
               # Xvfb (optional but harmless)
