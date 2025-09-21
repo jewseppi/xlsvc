@@ -81,76 +81,82 @@ jobs:
                   return 1
 
           def delete_empty_rows_direct(doc):
-              """Delete rows directly using UNO API"""
-              # Force all formulas to be calculated
-              doc.calculateAll()
-             
-              # Wait for calculation to complete
-              import time
-              time.sleep(1)
-              deleted_count = 0
+            # Force calculation first
+            doc.calculateAll()
+            time.sleep(2)  # Wait for calculations
+            
+            deleted_count = 0
+            
+            try:
+                sheets = doc.getSheets()
+                print(f"Processing {sheets.getCount()} sheets")
+                
+                for sheet_idx in range(sheets.getCount()):
+                    sheet = sheets.getByIndex(sheet_idx)
+                    sheet_name = sheet.getName()
+                    print(f"Processing sheet: {sheet_name}")
+                    
+                    cursor = sheet.createCursor()
+                    cursor.gotoEndOfUsedArea(False)
+                    last_row = cursor.getPosition().Row + 1
+                    print(f"Last row in {sheet_name}: {last_row}")
+                    
+                    rows_to_delete = []
+                    
+                    for row in range(last_row - 1, -1, -1):
+                        # Get column A value to identify the row
+                        col_a_cell = sheet.getCellByPosition(0, row)
+                        col_a_value = col_a_cell.getString().strip()
+                        
+                        all_empty = True
+                        debug_values = []
+                        
+                        # Check columns F, G, H, I (indices 5, 6, 7, 8)
+                        for col in [5, 6, 7, 8]:
+                            try:
+                                cell = sheet.getCellByPosition(col, row)
+                                cell_value = cell.getValue()
+                                cell_string = cell.getString().strip()
+                                cell_formula = ""
+                                try:
+                                    cell_formula = cell.getFormula()
+                                except:
+                                    pass
+                                
+                                debug_values.append(f"{chr(70+col-5)}={cell_value}|'{cell_string}'|{cell_formula}")
+                                
+                                if cell_value != 0 or cell_string != "":
+                                    all_empty = False
+                                    
+                            except Exception as e:
+                                print(f"Error checking cell ({col}, {row}): {e}")
+                                all_empty = False
+                                break
+                        
+                        # Debug output for rows containing "E-ST" 
+                        if "E-ST" in col_a_value:
+                            print(f"DEBUG Row {row+1} ({col_a_value}): {' | '.join(debug_values)} -> DELETE={all_empty}")
+                        
+                        if all_empty:
+                            rows_to_delete.append(row)
+                    
+                    print(f"Found {len(rows_to_delete)} empty rows to delete in {sheet_name}")
+                    
+                    # Delete rows
+                    for row in rows_to_delete:
+                        try:
+                            sheet.getRows().removeByIndex(row, 1)
+                            deleted_count += 1
+                        except Exception as e:
+                            print(f"Error deleting row {row}: {e}")
+                            
+            except Exception as e:
+                print(f"Error in delete_empty_rows_direct: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            return deleted_count
               
-              try:
-                  sheets = doc.getSheets()
-                  print(f"Processing {sheets.getCount()} sheets")
-                  
-                  # Process all sheets
-                  for sheet_idx in range(sheets.getCount()):
-                      sheet = sheets.getByIndex(sheet_idx)
-                      sheet_name = sheet.getName()
-                      print(f"Processing sheet: {sheet_name}")
-                      
-                      # Get the used range to find last row
-                      cursor = sheet.createCursor()
-                      cursor.gotoEndOfUsedArea(False)
-                      last_row = cursor.getPosition().Row + 1
-                      print(f"Last row in {sheet_name}: {last_row}")
-                      
-                      # Check rows from bottom to top
-                      rows_to_delete = []
-                      
-                      for row in range(last_row - 1, -1, -1):
-                          all_empty = True
-                          
-                          # Check columns F, G, H, I (indices 5, 6, 7, 8)
-                          for col in [5, 6, 7, 8]:
-                              try:
-                                  cell = sheet.getCellByPosition(col, row)
-                                  
-                                  # Check both value and string content
-                                  cell_value = cell.getValue()
-                                  cell_string = cell.getString().strip()
-                                  
-                                  if cell_value != 0 or cell_string != "":
-                                      all_empty = False
-                                      break
-                              except Exception as e:
-                                  print(f"Error checking cell ({col}, {row}): {e}")
-                                  all_empty = False
-                                  break
-                          
-                          if all_empty:
-                              rows_to_delete.append(row)
-                      
-                      print(f"Found {len(rows_to_delete)} empty rows to delete in {sheet_name}")
-                      
-                      # Delete rows (already in reverse order)
-                      for row in rows_to_delete:
-                          try:
-                              sheet.getRows().removeByIndex(row, 1)
-                              deleted_count += 1
-                              if deleted_count % 10 == 0:
-                                  print(f"Deleted {deleted_count} rows so far...")
-                          except Exception as e:
-                              print(f"Error deleting row {row}: {e}")
-                              
-              except Exception as e:
-                  print(f"Error in delete_empty_rows_direct: {e}")
-                  import traceback
-                  traceback.print_exc()
-              
-              return deleted_count
-
           if __name__ == "__main__":
               exit_code = main()
               print(f"UNO exit: {exit_code}")
