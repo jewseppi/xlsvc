@@ -82,6 +82,12 @@ jobs:
 
           def delete_empty_rows_direct(doc):
               """Delete rows directly using UNO API"""
+              # Force all formulas to be calculated
+              doc.calculateAll()
+             
+              # Wait for calculation to complete
+              import time
+              time.sleep(1)
               deleted_count = 0
               
               try:
