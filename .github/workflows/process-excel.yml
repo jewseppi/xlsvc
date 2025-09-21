@@ -1,466 +1,175 @@
 name: Process Excel File
 
 on:
-  repository_dispatch:
-    types: [process-excel]
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: "URL of the Excel file to process"
+        required: true
+        default: "https://example.com/sample.xlsx"
 
 jobs:
-  process-excel:
+  process:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
+      - name: Install LibreOffice
         run: |
           sudo apt-get update
-          sudo apt-get install -y libreoffice python3-uno xvfb
-          pip install requests
+          sudo apt-get install -y libreoffice python3-uno
 
-      - name: Download Excel file (robust)
-        env:
-          FILE_URL: ${{ github.event.client_payload.file_url }}
-        shell: bash
+      - name: Download input file
         run: |
-          set -euo pipefail
-          echo "Downloading file from: $FILE_URL"
+          curl -L "${{ github.event.inputs.file_url }}" -o input.xlsx
 
-          # Try 1: curl with retries (force HTTP/1.1 to dodge some proxies/CDNs)
-          if ! curl \
-              --http1.1 \
-              --fail \
-              --location \
-              --retry 7 \
-              --retry-delay 3 \
-              --retry-all-errors \
-              --speed-time 30 \
-              --speed-limit 10240 \
-              --max-time 1200 \
-              -H "User-Agent: GitHub-Actions-Excel-Processor" \
-              -o input.xlsx \
-              "$FILE_URL"
-          then
-          echo "curl failed, trying wget…"
-          # Try 2: wget with retries
-          if ! wget \
-              --tries=7 \
-              --waitretry=3 \
-              --retry-connrefused \
-              --no-verbose \
-              --header="User-Agent: GitHub-Actions-Excel-Processor" \
-              -O input.xlsx \
-              "$FILE_URL"
-          then
-              echo "Both curl and wget failed."
-              exit 1
-          fi
-          fi
-
-          echo "Download completed. File details:"
-          ls -la input.xlsx || true
-          file input.xlsx || true
-
-          # sanity check: require >= 1MB
-          sz=$(stat -c%s input.xlsx)
-          echo "Downloaded size: $sz bytes"
-          if [ "$sz" -lt 1048576 ]; then
-          echo "ERROR: Downloaded file too small."
-          exit 1
-          fi
-
-      - name: Check downloaded file
+      - name: Start LibreOffice headless
         run: |
-          echo "Checking downloaded file..."
-          ls -la input.xlsx
-          file input.xlsx
-          if [ $(stat -c%s input.xlsx) -lt 1000 ]; then
-            echo "ERROR: Downloaded file is too small ($(stat -c%s input.xlsx) bytes)"
-            echo "File head:"
-            hexdump -C input.xlsx | head -10
-            exit 1
-          fi
+          libreoffice --headless --invisible --nocrashreport --nodefault --nofirststartwizard --nologo --norestore --accept="socket,host=localhost,port=2002;urp;" &
+          sleep 5
 
-      - name: Download macro file
-        env:
-          MACRO_URL: ${{ github.event.client_payload.macro_url }}
-          MACRO_FILENAME: ${{ github.event.client_payload.macro_filename }}
+      - name: Process Excel file with UNO
         run: |
-          echo "Downloading macro: $MACRO_FILENAME from $MACRO_URL"
-          mkdir -p macros
-          curl -L -o "macros/$MACRO_FILENAME" "$MACRO_URL"
-          ls -la macros/
-
-      - name: Process Excel file with macro execution (UNO only)
-        env:
-          MACRO_FILENAME: ${{ github.event.client_payload.macro_filename }}
-        run: |
-          cat > process_with_macro.py << 'EOF'
-          import subprocess, os, time, shutil, sys, tempfile, textwrap
-
-          TIMEOUT_UNO = 420  # generous for big sheets
-
-          def kill_soffice():
-              for patt in ("soffice.bin", "soffice"):
-                  try: subprocess.run(["pkill", "-f", patt], check=False)
-                  except Exception: pass
-
-          def write_profile_prefs(profile_user_dir: str):
-              os.makedirs(profile_user_dir, exist_ok=True)
-              xcu = os.path.join(profile_user_dir, "registrymodifications.xcu")
-              with open(xcu, "w", encoding="utf-8") as f:
-                  f.write("""<?xml version="1.0" encoding="UTF-8"?>
-          <oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema">
-          <item oor:path="/org.openoffice.Office.Common/Misc">
-              <prop oor:name="FirstStartWizardCompleted" oor:type="xs:boolean"><value>true</value></prop>
-          </item>
-          <item oor:path="/org.openoffice.Office.Common/Security/Scripting">
-              <prop oor:name="MacroSecurityLevel" oor:type="xs:int"><value>0</value></prop>
-          </item>
-          </oor:items>
-          """)
-              print(f"Wrote {xcu}")
-
-          def install_user_macro(macro_dir: str, macro_file: str):
-              os.makedirs(macro_dir, exist_ok=True)
-              module_path = os.path.join(macro_dir, "Module1.bas")
-              
-              # Read and write macro content
-              with open(macro_file, 'r', encoding='utf-8') as f:
-                  macro_content = f.read()
-              with open(module_path, 'w', encoding='utf-8') as f:
-                  f.write(macro_content)
-              print(f"Wrote macro to: {module_path}")
-              
-              # Verify macro was written
-              if os.path.exists(module_path):
-                  print(f"✓ Macro file exists: {os.path.getsize(module_path)} bytes")
-              else:
-                  print(f"✗ Macro file missing: {module_path}")
-                  return False
-
-              # Register library via script.xlb/dialog.xlb AND libraries.xlc
-              basic_root = os.path.dirname(macro_dir)  # .../user/basic
-              script_xlb = os.path.join(basic_root, "script.xlb")
-              dialog_xlb = os.path.join(basic_root, "dialog.xlb")
-              libraries_xlc = os.path.join(basic_root, "libraries.xlc")
-              
-              print(f"Creating library files in: {basic_root}")
-              
-              for path, payload in [
-              (script_xlb, """<?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">
-          <library:library xmlns:library="http://openoffice.org/2000/library" library:name="Standard" library:readonly="false" library:passwordprotected="false">
-          <library:element library:name="Module1"/>
-          </library:library>
-          """),
-              (dialog_xlb, """<?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">
-          <library:library xmlns:library="http://openoffice.org/2000/library" library:name="Standard" library:readonly="false" library:passwordprotected="false">
-          </library:library>
-          """),
-              (libraries_xlc, """<?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE library:libraries PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "libraries.dtd">
-          <library:libraries xmlns:library="http://openoffice.org/2000/library" xmlns:xlink="http://www.w3.org/1999/xlink">
-          <library:library library:name="Standard" library:link="false"/>
-          </library:libraries>
-          """)
-              ]:
-                  os.makedirs(os.path.dirname(path), exist_ok=True)
-                  with open(path, 'w', encoding='utf-8') as f:
-                      f.write(payload)
-                  print(f"Created {path}")
-              
-              # Debug: List all files created
-              print("Macro installation complete. Files created:")
-              for root, dirs, files in os.walk(basic_root):
-                  for file in files:
-                      full_path = os.path.join(root, file)
-                      print(f"  {full_path} ({os.path.getsize(full_path)} bytes)")
-              
-              return True
-
-          def start_xvfb():
-              print("Starting Xvfb...")
-              return subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1024x768x24"],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-          def method_uno(profile_uri, env, output_path, timeout):
-              """Start a listening soffice and invoke macro via UNO (Python-UNO)."""
-              accept = "socket,host=127.0.0.1,port=2002;urp;"
-              soff = subprocess.Popen([
-                  "libreoffice",
-                  f"-env:UserInstallation={profile_uri}",
-                  "--headless", "--nologo", "--norestore", "--nodefault",
-                  f"--accept={accept}"
-              ], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-              uno_script = textwrap.dedent(f"""
-                  import sys, time, pathlib, uno
-                  from com.sun.star.connection import NoConnectException
-
-                  OUTPUT_URL = pathlib.Path(r{output_path!r}).resolve().as_uri()
-
-                  def connect(max_attempts=80, delay=0.5):
-                      local_ctx = uno.getComponentContext()
-                      resolver = local_ctx.ServiceManager.createInstanceWithContext(
-                          'com.sun.star.bridge.UnoUrlResolver', local_ctx)
-                      for _ in range(max_attempts):
-                          try:
-                              return resolver.resolve(
-                                  'uno:socket,host=127.0.0.1,port=2002;urp;StarOffice.ComponentContext'
-                              )
-                          except NoConnectException:
-                              time.sleep(delay)
-                      raise RuntimeError('UNO server not ready')
-
-                  def main():
-                      print("UNO script starting...")
-                      print(f"Output URL: {{OUTPUT_URL}}")
-                      
-                      ctx = connect()
-                      print("Connected to LibreOffice UNO server")
-                      
-                      smgr = ctx.ServiceManager
-                      desktop = smgr.createInstanceWithContext('com.sun.star.frame.Desktop', ctx)
-
-                      hidden = uno.createUnoStruct('com.sun.star.beans.PropertyValue')
-                      hidden.Name = 'Hidden'; hidden.Value = True
-                      doc = desktop.loadComponentFromURL(OUTPUT_URL, '_blank', 0, (hidden,))
-                      print("Document loaded")
-
-                      try:
-                          # Force reload of macro libraries
-                          print("Reloading macro libraries...")
-                          
-                          # Get the Basic library container for the document
-                          doc_basic_libs = doc.BasicLibraries
-                          
-                          # Try to reload the Standard library if it exists
-                          if doc_basic_libs.hasByName("Standard"):
-                              print("Standard library already exists in document, reloading...")
-                              doc_basic_libs.reloadLibrary("Standard")
-                          
-                          # Get script provider and try to find the macro
-                          mspi = smgr.createInstanceWithContext(
-                              'com.sun.star.script.provider.MasterScriptProviderFactory', ctx)
-                          provider = mspi.createScriptProvider('')
-                          print("Script provider created")
-                          
-                          # Try document location first
-                          script_uri = 'vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=document'
-                          print(f"Looking for script in document: {{script_uri}}")
-                          
-                          try:
-                              script = provider.getScript(script_uri)
-                              print("Script found in document location, executing...")
-                          except Exception as doc_e:
-                              print(f"Script not found in document: {{doc_e}}")
-                              # Try user location as fallback
-                              script_uri = 'vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=user'
-                              print(f"Looking for script in user location: {{script_uri}}")
-                              script = provider.getScript(script_uri)
-                              print("Script found in user location, executing...")
-                          
-                          script.invoke((), (), ())
-                          print("Script executed successfully")
-                          
-                      except Exception as e:
-                          print(f"Script error: {{e}}")
-                          print(f"Error type: {{type(e)}}")
-                          # Try to list available scripts
-                          try:
-                              print("Available script locations:")
-                              browseNode = provider.browse(None)
-                              if browseNode.hasChildNodes():
-                                  children = browseNode.getChildNodes()
-                                  for i in range(children.getCount()):
-                                      child = children.getByIndex(i)
-                                      print(f"  - {{child.getName()}} ({{child.getType()}})")
-                              else:
-                                  print("  No child nodes found")
-                          except Exception as browse_e:
-                              print(f"Could not browse scripts: {{browse_e}}")
-                          raise
-
-                      try:
-                          doc.store()
-                          print("Document saved")
-                          doc.close(True)
-                          print("Document closed")
-                      except Exception:
-                          pass
-
-                      desktop.terminate()
-                      print("LibreOffice terminated")
-
-                  if __name__ == '__main__':
-                      main()
-              """).strip()
-
-              with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tf:
-                  tf.write(uno_script)
-                  uno_path = tf.name
-
-              try:
-                  # IMPORTANT: use system python where python3-uno is installed
-                  r = subprocess.run(["/usr/bin/python3", uno_path], capture_output=True, text=True, env=env, timeout=timeout)
-                  if r.stdout: print(r.stdout)
-                  if r.stderr: print(r.stderr)
-                  return r.returncode
-              finally:
-                  try: os.unlink(uno_path)
-                  except Exception: pass
-                  try: soff.terminate(); soff.wait(timeout=5)
-                  except Exception:
-                      try: soff.kill()
-                      except Exception: pass
-
-          def _check_output():
-              if os.path.exists("output.xlsx") and os.path.getsize("output.xlsx") > 1000:
-                  print(f"Output file size after macro: {os.path.getsize('output.xlsx')} bytes")
-                  return True
-              print("✗ Output file missing/too small")
-              return False
-
-          def execute_macro_via_libreoffice():
-              # Get macro filename from environment
-              macro_filename = os.environ.get('MACRO_FILENAME')
-              
-              if not macro_filename:
-                  print("ERROR: No macro filename provided")
-                  return False
-              
-              macro_file = os.path.join('macros', macro_filename)
-              
-              if not os.path.exists(macro_file):
-                  print(f"ERROR: Macro file not found: {macro_file}")
-                  return False
-              
-              print(f"Using macro file: {macro_file}")
-              
-              # Sanity checks
-              if not os.path.exists('input.xlsx'):
-                  print("ERROR: input.xlsx not found")
-                  return False
-              if os.path.getsize('input.xlsx') < 1000:
-                  print("ERROR: Input file too small")
-                  return False
-
-              shutil.copy2('input.xlsx', 'output.xlsx')
-              print("Copied input to output file")
-
-              # Prepare clean temp LO profile + user macro
-              profile_dir = os.path.abspath("./lo-profile")
-              user_dir    = os.path.join(profile_dir, "user")
-              macro_dir   = os.path.join(user_dir, "basic", "Standard")
-              
-              print(f"Setting up LibreOffice profile at: {profile_dir}")
-              write_profile_prefs(user_dir)
-              
-              if not install_user_macro(macro_dir, macro_file):
-                  print("Failed to install macro")
-                  return False
-              
-              profile_uri = "file://" + profile_dir
-              print(f"Profile URI: {profile_uri}")
-
-              # Xvfb (optional but harmless)
-              xvfb = start_xvfb()
-              time.sleep(2)
-              env = os.environ.copy()
-              env["DISPLAY"] = ":99"
-
-              # UNO only
-              print("Executing UNO method…")
-              try:
-                  code = method_uno(profile_uri, env, os.path.abspath("output.xlsx"), TIMEOUT_UNO)
-                  print("UNO exit:", code)
-                  if code == 0:
-                      return _check_output()
-              except subprocess.TimeoutExpired:
-                  print("UNO timed out.")
-              finally:
-                  kill_soffice()
-                  try: 
-                      xvfb.terminate()
-                      xvfb.wait(timeout=5)
-                  except Exception:
-                      try: 
-                          xvfb.kill()
-                      except Exception: 
-                          pass
-
-              print("✗ UNO failed")
-              return False
-
-          if __name__ == "__main__":
-              print("=" * 60)
-              print("Starting Excel file processing with LibreOffice macro")
-              print("=" * 60)
-              ok = execute_macro_via_libreoffice()
-              print("=" * 60)
-              if ok:
-                  print("✓ Processing completed successfully")
-                  print("=" * 60)
-                  sys.exit(0)
-              else:
-                  print("✗ Processing failed")
-                  print("=" * 60)
-                  sys.exit(1)
-          EOF
-
-          python process_with_macro.py
-
-      - name: Upload result and send callback
-        env:
-          CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
-          CALLBACK_TOKEN: ${{ github.event.client_payload.callback_token }}
-          FILE_ID: ${{ github.event.client_payload.file_id }}
-        run: |
-          cat > upload_and_callback.py << 'EOF'
-          import os, requests, subprocess, json, time
-          def send_callback(callback_url, callback_token, success, download_url, log, deleted_rows, file_id):
-              payload = {'file_id': file_id, 'success': success, 'download_url': download_url,
-                         'processing_log': log, 'deleted_rows': deleted_rows}
-              headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {callback_token}'}
-              try:
-                  r = requests.post(callback_url, json=payload, headers=headers, timeout=30)
-                  print(f"Callback sent: {r.status_code}")
-                  if r.status_code != 200: print(f"Callback error: {r.text}")
-              except Exception as e:
-                  print(f"Callback failed: {e}")
+          cat > process_uno.py << 'EOF'
+          import uno
+          import os
+          import sys
 
           def main():
-              output_file = "output.xlsx"
-              callback_url = os.environ.get('CALLBACK_URL')
-              callback_token = os.environ.get('CALLBACK_TOKEN')
-              file_id = os.environ.get('FILE_ID')
-              print(f"Processing completed for file {file_id}")
-              if os.path.exists(output_file):
-                  sz = os.path.getsize(output_file)
-                  print(f"Output file exists, size: {sz} bytes")
-                  # No GH release here yet; just callback success
-                  send_callback(callback_url, callback_token, True, None,
-                               [f"LibreOffice processing completed", f"File size: {sz} bytes"], 0, file_id)
-              else:
-                  print("Output file not found")
-                  send_callback(callback_url, callback_token, False, None,
-                               ["Output file not found after processing"], 0, file_id)
-          if __name__ == "__main__":
-              main()
-          EOF
-          python upload_and_callback.py
+              try:
+                  print("UNO script starting...")
+                  
+                  # Connect to LibreOffice
+                  localContext = uno.getComponentContext()
+                  resolver = localContext.ServiceManager.createInstanceWithContext(
+                      "com.sun.star.bridge.UnoUrlResolver", localContext)
+                  
+                  print("Connecting to LibreOffice UNO server...")
+                  context = resolver.resolve("uno:socket,host=localhost,port=2002;urp;StarOffice.ComponentContext")
+                  desktop = context.ServiceManager.createInstanceWithContext(
+                      "com.sun.star.frame.Desktop", context)
+                  
+                  print("Connected to LibreOffice UNO server")
+                  
+                  # Load document
+                  input_path = os.path.abspath("input.xlsx")
+                  file_url = uno.systemPathToFileUrl(input_path)
+                  print(f"Loading document: {file_url}")
+                  
+                  doc = desktop.loadComponentFromURL(file_url, "_blank", 0, ())
+                  print("Document loaded")
+                  
+                  # Process directly with UNO API
+                  deleted_rows = delete_empty_rows_direct(doc)
+                  print(f"Deleted {deleted_rows} empty rows")
+                  
+                  # Save the result
+                  output_path = os.path.abspath("output.xlsx")
+                  output_url = uno.systemPathToFileUrl(output_path)
+                  print(f"Output URL: {output_url}")
+                  
+                  doc.storeAsURL(output_url, ())
+                  doc.close(True)
+                  
+                  print(f"Processing complete. Deleted {deleted_rows} rows.")
+                  return 0
+                  
+              except Exception as e:
+                  print(f"Error: {e}")
+                  import traceback
+                  traceback.print_exc()
+                  return 1
 
-      - name: Upload processed file as artifact (backup)
-        if: always()
+          def delete_empty_rows_direct(doc):
+              """Delete rows directly using UNO API"""
+              deleted_count = 0
+              
+              try:
+                  sheets = doc.getSheets()
+                  print(f"Processing {sheets.getCount()} sheets")
+                  
+                  # Process all sheets
+                  for sheet_idx in range(sheets.getCount()):
+                      sheet = sheets.getByIndex(sheet_idx)
+                      sheet_name = sheet.getName()
+                      print(f"Processing sheet: {sheet_name}")
+                      
+                      # Get the used range to find last row
+                      cursor = sheet.createCursor()
+                      cursor.gotoEndOfUsedArea(False)
+                      last_row = cursor.getPosition().Row + 1
+                      print(f"Last row in {sheet_name}: {last_row}")
+                      
+                      # Check rows from bottom to top
+                      rows_to_delete = []
+                      
+                      for row in range(last_row - 1, -1, -1):
+                          all_empty = True
+                          
+                          # Check columns F, G, H, I (indices 5, 6, 7, 8)
+                          for col in [5, 6, 7, 8]:
+                              try:
+                                  cell = sheet.getCellByPosition(col, row)
+                                  
+                                  # Check both value and string content
+                                  cell_value = cell.getValue()
+                                  cell_string = cell.getString().strip()
+                                  
+                                  if cell_value != 0 or cell_string != "":
+                                      all_empty = False
+                                      break
+                              except Exception as e:
+                                  print(f"Error checking cell ({col}, {row}): {e}")
+                                  all_empty = False
+                                  break
+                          
+                          if all_empty:
+                              rows_to_delete.append(row)
+                      
+                      print(f"Found {len(rows_to_delete)} empty rows to delete in {sheet_name}")
+                      
+                      # Delete rows (already in reverse order)
+                      for row in rows_to_delete:
+                          try:
+                              sheet.getRows().removeByIndex(row, 1)
+                              deleted_count += 1
+                              if deleted_count % 10 == 0:
+                                  print(f"Deleted {deleted_count} rows so far...")
+                          except Exception as e:
+                              print(f"Error deleting row {row}: {e}")
+                              
+              except Exception as e:
+                  print(f"Error in delete_empty_rows_direct: {e}")
+                  import traceback
+                  traceback.print_exc()
+              
+              return deleted_count
+
+          if __name__ == "__main__":
+              exit_code = main()
+              print(f"UNO exit: {exit_code}")
+              sys.exit(exit_code)
+          EOF
+
+          python3 process_uno.py
+
+      - name: Upload processed file
         uses: actions/upload-artifact@v4
         with:
-          name: processed-excel-${{ github.event.client_payload.file_id }}
+          name: processed-excel
           path: output.xlsx
-          retention-days: 1
+          retention-days: 30
+
+      - name: Show file info
+        run: |
+          if [ -f "output.xlsx" ]; then
+            echo "✅ Processing successful"
+            echo "Output file size: $(stat -c%s output.xlsx) bytes"
+            echo "============================================================"
+          else
+            echo "✗ Processing failed"
+            echo "============================================================"
+            exit 1
+          fi
