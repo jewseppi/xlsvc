@@ -144,10 +144,11 @@ jobs:
                   print(f"✗ Macro file missing: {module_path}")
                   return False
 
-              # Register library via script.xlb/dialog.xlb
+              # Register library via script.xlb/dialog.xlb AND libraries.xlc
               basic_root = os.path.dirname(macro_dir)  # .../user/basic
               script_xlb = os.path.join(basic_root, "script.xlb")
               dialog_xlb = os.path.join(basic_root, "dialog.xlb")
+              libraries_xlc = os.path.join(basic_root, "libraries.xlc")
               
               print(f"Creating library files in: {basic_root}")
               
@@ -162,6 +163,12 @@ jobs:
           <!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">
           <library:library xmlns:library="http://openoffice.org/2000/library" library:name="Standard" library:readonly="false" library:passwordprotected="false">
           </library:library>
+          """),
+              (libraries_xlc, """<?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE library:libraries PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "libraries.dtd">
+          <library:libraries xmlns:library="http://openoffice.org/2000/library" xmlns:xlink="http://www.w3.org/1999/xlink">
+          <library:library library:name="Standard" library:link="false"/>
+          </library:libraries>
           """)
               ]:
                   os.makedirs(os.path.dirname(path), exist_ok=True)
