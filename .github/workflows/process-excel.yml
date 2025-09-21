@@ -235,18 +235,37 @@ jobs:
                       print("Document loaded")
 
                       try:
+                          # Force reload of macro libraries
+                          print("Reloading macro libraries...")
+                          
+                          # Get the Basic library container for the document
+                          doc_basic_libs = doc.BasicLibraries
+                          
+                          # Try to reload the Standard library if it exists
+                          if doc_basic_libs.hasByName("Standard"):
+                              print("Standard library already exists in document, reloading...")
+                              doc_basic_libs.reloadLibrary("Standard")
+                          
                           # Get script provider and try to find the macro
                           mspi = smgr.createInstanceWithContext(
                               'com.sun.star.script.provider.MasterScriptProviderFactory', ctx)
                           provider = mspi.createScriptProvider('')
                           print("Script provider created")
                           
-                          # Try to get the script
-                          script_uri = 'vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=user'
-                          print(f"Looking for script: {{script_uri}}")
+                          # Try document location first
+                          script_uri = 'vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=document'
+                          print(f"Looking for script in document: {{script_uri}}")
                           
-                          script = provider.getScript(script_uri)
-                          print("Script found, executing...")
+                          try:
+                              script = provider.getScript(script_uri)
+                              print("Script found in document location, executing...")
+                          except Exception as doc_e:
+                              print(f"Script not found in document: {{doc_e}}")
+                              # Try user location as fallback
+                              script_uri = 'vnd.sun.star.script:Standard.Module1.DeleteEmptyRows?language=Basic&location=user'
+                              print(f"Looking for script in user location: {{script_uri}}")
+                              script = provider.getScript(script_uri)
+                              print("Script found in user location, executing...")
                           
                           script.invoke((), (), ())
                           print("Script executed successfully")
@@ -263,6 +282,8 @@ jobs:
                                   for i in range(children.getCount()):
                                       child = children.getByIndex(i)
                                       print(f"  - {{child.getName()}} ({{child.getType()}})")
+                              else:
+                                  print("  No child nodes found")
                           except Exception as browse_e:
                               print(f"Could not browse scripts: {{browse_e}}")
                           raise
