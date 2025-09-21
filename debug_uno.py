@@ -2,34 +2,33 @@ import logging
 import time
 import subprocess
 import socket
-import psutil
+import os
 import uno
 from com.sun.star.connection import NoConnectException
 
 logger = logging.getLogger(__name__)
 
 def check_libreoffice_process():
-    """Check if LibreOffice is running"""
+    """Check if LibreOffice is running using simple process check"""
     logger.info("=== Checking LibreOffice Process ===")
     
-    libreoffice_processes = []
-    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-        try:
-            if any('soffice' in str(item).lower() or 'libreoffice' in str(item).lower() 
-                   for item in [proc.info['name']] + (proc.info['cmdline'] or [])):
-                libreoffice_processes.append({
-                    'pid': proc.info['pid'],
-                    'name': proc.info['name'],
-                    'cmdline': proc.info['cmdline']
-                })
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-    
-    logger.info(f"Found {len(libreoffice_processes)} LibreOffice processes:")
-    for proc in libreoffice_processes:
-        logger.info(f"  PID {proc['pid']}: {proc['name']} - {proc['cmdline']}")
-    
-    return len(libreoffice_processes) > 0
+    try:
+        # Simple check using ps command
+        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True, timeout=5)
+        processes = result.stdout
+        
+        libreoffice_lines = [line for line in processes.split('\n') 
+                           if 'soffice' in line.lower() or 'libreoffice' in line.lower()]
+        
+        logger.info(f"Found {len(libreoffice_lines)} LibreOffice processes:")
+        for line in libreoffice_lines:
+            logger.info(f"  {line.strip()}")
+        
+        return len(libreoffice_lines) > 0
+        
+    except Exception as e:
+        logger.warning(f"Could not check processes: {e}")
+        return False
 
 def check_port_availability(host='localhost', port=2002):
     """Check if the UNO port is available"""
@@ -120,25 +119,35 @@ def start_libreoffice_with_retry(max_retries=3, wait_time=10):
     return None
 
 def kill_existing_libreoffice():
-    """Kill any existing LibreOffice processes"""
+    """Kill any existing LibreOffice processes using killall"""
     logger.info("=== Killing Existing LibreOffice Processes ===")
     
-    killed_count = 0
-    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-        try:
-            if any('soffice' in str(item).lower() or 'libreoffice' in str(item).lower() 
-                   for item in [proc.info['name']] + (proc.info['cmdline'] or [])):
-                logger.info(f"Killing process {proc.info['pid']}: {proc.info['name']}")
-                proc.terminate()
-                killed_count += 1
-        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-            logger.warning(f"Couldn't kill process: {e}")
-    
-    if killed_count > 0:
-        logger.info(f"Killed {killed_count} LibreOffice processes")
+    try:
+        # Try to kill LibreOffice processes
+        commands = [
+            ['killall', 'soffice.bin'],
+            ['killall', 'libreoffice'],
+            ['pkill', '-f', 'soffice'],
+            ['pkill', '-f', 'libreoffice']
+        ]
+        
+        for cmd in commands:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    logger.info(f"Successfully ran: {' '.join(cmd)}")
+                else:
+                    logger.info(f"No processes found for: {' '.join(cmd)}")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Timeout running: {' '.join(cmd)}")
+            except FileNotFoundError:
+                logger.info(f"Command not found: {' '.join(cmd)}")
+        
         time.sleep(3)  # Give time for cleanup
-    else:
-        logger.info("No existing LibreOffice processes found")
+        logger.info("Process cleanup completed")
+        
+    except Exception as e:
+        logger.warning(f"Error during process cleanup: {e}")
 
 def test_uno_connection_with_timeout():
     """Test UNO connection with various timeout settings"""
