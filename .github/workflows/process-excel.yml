@@ -29,7 +29,7 @@ jobs:
           sleep 10
 
       - name: Process Excel file with UNO
-        run: python3 scripts/process_uno.py
+        run: python3 process_uno.py
 
       - name: Upload processed file
         uses: actions/upload-artifact@v4
