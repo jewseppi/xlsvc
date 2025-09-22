@@ -92,7 +92,9 @@ def delete_empty_rows_direct(doc):
                             
                             debug_values.append(f"{chr(70+col-5)}={cell_value}|'{cell_string}'")
                             
-                            if cell_value != 0 or cell_string != "":
+                            is_empty = (cell_value == 0 or cell_value == 0.0) and (cell_string == "" or cell_string == "0")
+                            
+                            if not is_empty:
                                 all_empty = False
                                 
                         except Exception as e:
