@@ -99,7 +99,7 @@ jobs:
                     
                     cursor = sheet.createCursor()
                     cursor.gotoEndOfUsedArea(False)
-                    last_row = cursor.getPosition().Row + 1
+                    last_row = cursor.Position().Row + 1
                     print(f"Last row in {sheet_name}: {last_row}")
                     
                     rows_to_delete = []
