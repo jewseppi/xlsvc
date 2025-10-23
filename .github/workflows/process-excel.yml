@@ -29,6 +29,8 @@ jobs:
           sleep 10
 
       - name: Process Excel file with UNO
+        env:
+          FILTER_RULES: ${{ github.event.client_payload.filter_rules }}
         run: python3 process_uno.py
 
       - name: Upload processed file

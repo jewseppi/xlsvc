@@ -1211,6 +1211,20 @@ def process_file_automated(file_id):
         current_user_email = get_jwt_identity()
         print(f"DEBUG: User: {current_user_email}")
         
+        # Get filter rules from request body
+        data = request.get_json() or {}
+        filter_rules = data.get('filter_rules')
+        
+        # Validate filter rules
+        if not filter_rules or not isinstance(filter_rules, list) or len(filter_rules) == 0:
+            return jsonify({
+                'error': 'filter_rules required and must be a non-empty array'
+            }), 400
+        
+        print(f"DEBUG: Processing with {len(filter_rules)} filter rules")
+        for i, rule in enumerate(filter_rules, 1):
+            print(f"DEBUG: Rule {i}: Column {rule.get('column')} = '{rule.get('value')}'")
+        
         # Get file info and verify ownership
         conn = get_db()
         user = conn.execute(
@@ -1241,53 +1255,17 @@ def process_file_automated(file_id):
             print(f"DEBUG: File not found on disk: {input_path}")
             return jsonify({'error': 'File not found on disk'}), 404
         
-        # Analyze the file first to generate macro
-        print("DEBUG: Starting file analysis...")
-        rows_to_delete_by_sheet = analyze_excel_file(input_path)
-        
-        if not rows_to_delete_by_sheet:
-            print("DEBUG: No rows to delete found")
-            return jsonify({'message': 'No rows to delete'}), 200
-        
-        print(f"DEBUG: Found rows to delete in {len(rows_to_delete_by_sheet)} sheets")
-        
-        # Generate the macro content and save it
         file_dict = dict(file_info)
-        macro_content = generate_libreoffice_macro(
-            file_dict['original_filename'], 
-            rows_to_delete_by_sheet
-        )
-        
-        # Save macro file
-        macro_filename = f"macro_{uuid.uuid4().hex[:8]}.bas"
-        macro_path = os.path.join(app.config['MACROS_FOLDER'], macro_filename)
-        
-        with open(macro_path, 'w', encoding='utf-8') as f:
-            f.write(macro_content)
-        
-        print(f"DEBUG: Generated macro file: {macro_filename}")
-        
-        # Record macro in database
-        macro_file_id = conn.execute(
-            '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type) 
-               VALUES (?, ?, ?, ?, ?, ?)''',
-            (file_dict['user_id'], f"Macro_{file_dict['original_filename']}.bas", 
-             macro_filename, os.path.getsize(macro_path), True, 'macro')
-        ).lastrowid
-        
-        print(f"DEBUG: Macro file saved with ID: {macro_file_id}")
         
         # Create job ID and callback token
         job_id = secrets.token_urlsafe(16)
         callback_token = secrets.token_urlsafe(32)
         
-        # Generate download tokens for both original file and macro
+        # Generate download token for the file
         download_token = generate_download_token(file_id, user['id'], expires_in_minutes=30)
-        macro_download_token = generate_download_token(macro_file_id, user['id'], expires_in_minutes=30)
         
         print(f"DEBUG: Generated job_id: {job_id}")
         print(f"DEBUG: Generated download token: {download_token[:20]}...")
-        print(f"DEBUG: Generated macro download token: {macro_download_token[:20]}...")
         
         # Store job in database
         conn.execute(
@@ -1300,7 +1278,7 @@ def process_file_automated(file_id):
         
         print("DEBUG: Job stored in database")
         
-        # Check environment variables
+        # Get GitHub credentials
         app_id = os.getenv('GITHUB_APP_ID')
         private_key = os.getenv('GITHUB_PRIVATE_KEY', '').replace('\\n', '\n')
         installation_id = os.getenv('GITHUB_INSTALLATION_ID')
@@ -1321,15 +1299,13 @@ def process_file_automated(file_id):
                 }
             }), 500
         
-        # Get GitHub token using App authentication
-        print("DEBUG: Initializing GitHub auth...")
+        # Get GitHub token
+        print("DEBUG: Getting GitHub token...")
         github_auth = GitHubAppAuth()
-        
-        print("DEBUG: Getting installation token...")
         github_token = github_auth.get_installation_token()
-        print(f"DEBUG: Got installation token: {github_token[:20]}...")
+        print(f"DEBUG: Got token: {github_token[:20]}...")
         
-        # Prepare GitHub Actions payload with download tokens
+        # Prepare GitHub Actions payload with filter_rules
         base_url = request.host_url.rstrip('/')
         github_payload = {
             "event_type": "process-excel",
@@ -1337,15 +1313,14 @@ def process_file_automated(file_id):
                 "file_id": str(file_id),
                 "file_url": f"{base_url}/api/download-with-token/{file_id}?token={download_token}",
                 "download_token": download_token,
-                "macro_url": f"{base_url}/api/download-with-token/{macro_file_id}?token={macro_download_token}",
-                "macro_filename": macro_filename,
                 "callback_url": f"{base_url}/api/processing-callback",
                 "callback_token": callback_token,
-                "job_id": job_id
+                "job_id": job_id,
+                "filter_rules": json.dumps(filter_rules)  # ADD THIS - pass filter rules as JSON string
             }
         }
         
-        print(f"DEBUG: GitHub payload prepared with macro filename: {macro_filename}")
+        print(f"DEBUG: GitHub payload prepared with filter_rules")
         
         headers = {
             'Authorization': f'Bearer {github_token}',
@@ -1370,8 +1345,7 @@ def process_file_automated(file_id):
                 'message': 'Processing started via GitHub Actions',
                 'job_id': job_id,
                 'status': 'pending',
-                'estimated_time': '2-3 minutes',
-                'macro_file_id': macro_file_id
+                'estimated_time': '2-3 minutes'
             }), 202
         else:
             print(f"DEBUG: GitHub API error: {response.text}")

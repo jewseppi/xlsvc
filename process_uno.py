@@ -27,6 +27,12 @@ def main():
         doc = desktop.loadComponentFromURL(file_url, "_blank", 0, ())
         print("Document loaded")
         
+        # Get filter rules from environment
+        filter_rules = get_filter_rules()
+        print(f"Using {len(filter_rules)} filter rules:")
+        for rule in filter_rules:
+            print(f"  - Column {rule['column']} = '{rule['value']}'")
+
         # Process directly with UNO API
         deleted_rows = delete_empty_rows_direct(doc)
         print(f"Deleted {deleted_rows} empty rows")
@@ -48,7 +54,40 @@ def main():
         traceback.print_exc()
         return 1
 
-def delete_empty_rows_direct(doc):
+def get_filter_rules():
+    """Get filter rules from environment variable - frontend always provides them"""
+    filter_rules_json = os.getenv('FILTER_RULES')
+    
+    if not filter_rules_json:
+        raise Exception("FILTER_RULES environment variable is required")
+    
+    try:
+        rules = json.loads(filter_rules_json)
+        print(f"Loaded {len(rules)} filter rules from FILTER_RULES env var")
+        
+        if not rules or len(rules) == 0:
+            raise Exception("FILTER_RULES cannot be empty")
+        
+        return rules
+    except json.JSONDecodeError as e:
+        raise Exception(f"Invalid FILTER_RULES JSON: {e}")
+
+def column_to_index(col):
+    """Convert column letter or number to zero-based index"""
+    col = str(col).strip().upper()
+    
+    # If it's already a number, convert directly
+    if col.isdigit():
+        return int(col) - 1
+    
+    # Convert letter(s) to index (A=0, B=1, ... Z=25, AA=26, etc.)
+    index = 0
+    for char in col:
+        if char.isalpha():
+            index = index * 26 + (ord(char) - ord('A') + 1)
+    return index - 1
+
+def delete_empty_rows_direct(doc, filter_rules):
     # Force calculation first
     doc.calculateAll()
     time.sleep(2)
@@ -83,15 +122,19 @@ def delete_empty_rows_direct(doc):
                     all_empty = True
                     debug_values = []
                     
-                    # Check columns F, G, H, I (indices 5, 6, 7, 8)
-                    for col in [5, 6, 7, 8]:
+                    # Check columns based on filter_rules instead of hardcoded F,G,H,I
+                    for rule in filter_rules:
                         try:
-                            cell = sheet.getCellByPosition(col, row)
+                            col_index = column_to_index(rule['column'])
+                            expected_value = rule['value']
+                            
+                            cell = sheet.getCellByPosition(col_index, row)
                             cell_value = cell.getValue()
                             cell_string = cell.getString().strip()
                             
-                            debug_values.append(f"{chr(70+col-5)}={cell_value}|'{cell_string}'")
+                            debug_values.append(f"{rule['column']}={cell_value}|'{cell_string}'")
                             
+                            # YOUR EXACT WORKING LOGIC for checking if empty
                             is_empty = (cell_value == 0 or cell_value == 0.0) and (cell_string == "" or cell_string == "0")
                             
                             if not is_empty:
@@ -100,10 +143,6 @@ def delete_empty_rows_direct(doc):
                         except Exception as e:
                             all_empty = False
                             break
-                    
-                    # Debug output for rows containing "E-ST" 
-                    if "E-ST" in col_a_value:
-                        print(f"DEBUG Row {row+1} ({col_a_value}): {' | '.join(debug_values)} -> DELETE={all_empty}")
                     
                     if all_empty:
                         rows_to_delete.append(row)
