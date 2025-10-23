@@ -33,19 +33,41 @@ jobs:
           FILTER_RULES: ${{ github.event.client_payload.filter_rules }}
         run: python3 process_uno.py
 
-      - name: Upload processed file
-        uses: actions/upload-artifact@v4
-        with:
-          name: processed-excel
-          path: output.xlsx
-          retention-days: 30
-
-      - name: Show file info
+      - name: Upload processed file back to server
+        if: success()
         run: |
           if [ -f "output.xlsx" ]; then
-            echo "✅ Processing successful"
+            echo "✅ Processing successful - uploading to server"
             echo "Output file size: $(stat -c%s output.xlsx) bytes"
+            
+            # Upload the file back to the callback URL
+            curl -X POST \
+              -F "job_id=${{ github.event.client_payload.job_id }}" \
+              -F "file=@output.xlsx" \
+              -H "Authorization: Bearer ${{ github.event.client_payload.callback_token }}" \
+              "${{ github.event.client_payload.callback_url }}"
+            
+            echo "Upload complete!"
           else
-            echo "✗ Processing failed"
+            echo "❌ Processing failed - output.xlsx not found"
             exit 1
           fi
+
+      - name: Notify failure
+        if: failure()
+        run: |
+          # Notify the server that processing failed
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ github.event.client_payload.callback_token }}" \
+            -d "{\"job_id\":\"${{ github.event.client_payload.job_id }}\",\"status\":\"failed\",\"error\":\"GitHub Actions workflow failed\"}" \
+            "${{ github.event.client_payload.callback_url }}"
+
+      - name: Upload as GitHub artifact (backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: processed-excel-${{ github.event.client_payload.job_id }}
+          path: output.xlsx
+          retention-days: 7
+          if-no-files-found: warn
