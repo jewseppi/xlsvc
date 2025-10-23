@@ -35,7 +35,7 @@ def main():
             print(f"  - Column {rule['column']} = '{rule['value']}'")
 
         # Process directly with UNO API
-        deleted_rows = delete_empty_rows_direct(doc)
+        deleted_rows = delete_empty_rows_direct(doc, filter_rules)
         print(f"Deleted {deleted_rows} empty rows")
         
         # Save the result
