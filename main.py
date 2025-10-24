@@ -148,9 +148,47 @@ def init_db():
         cursor.execute('ALTER TABLE files ADD COLUMN file_type TEXT DEFAULT "original"')
     except sqlite3.OperationalError:
         pass
+
+    try:
+        # Add parent_file_id to files table
+        cursor.execute('''
+            ALTER TABLE files ADD COLUMN parent_file_id INTEGER
+        ''')
+        print("✅ Added parent_file_id to files table")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e):
+            print("⚠️  parent_file_id column already exists")
+        else:
+            raise
+    
+    try:
+        # Add deleted_rows to processing_jobs table
+        cursor.execute('''
+            ALTER TABLE processing_jobs ADD COLUMN deleted_rows INTEGER DEFAULT 0
+        ''')
+        print("✅ Added deleted_rows to processing_jobs table")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e):
+            print("⚠️  deleted_rows column already exists")
+        else:
+            raise
+    
+    try:
+        # Add filter_rules_json to processing_jobs table
+        cursor.execute('''
+            ALTER TABLE processing_jobs ADD COLUMN filter_rules_json TEXT
+        ''')
+        print("✅ Added filter_rules_json to processing_jobs table")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e):
+            print("⚠️  filter_rules_json column already exists")
+        else:
+            raise
     
     conn.commit()
     conn.close()
+
+    print("\n✅ Database migration complete!")
 
 # Initialize database on startup
 init_db()
@@ -1651,52 +1689,5 @@ def get_profile():
     current_user_email = get_jwt_identity()
     return jsonify({'email': current_user_email})
 
-def migrate_database():
-    """Add columns for tracking processing history"""
-    conn = sqlite3.connect('xlsvc.db')
-    cursor = conn.cursor()
-    
-    try:
-        # Add parent_file_id to files table
-        cursor.execute('''
-            ALTER TABLE files ADD COLUMN parent_file_id INTEGER
-        ''')
-        print("✅ Added parent_file_id to files table")
-    except sqlite3.OperationalError as e:
-        if "duplicate column name" in str(e):
-            print("⚠️  parent_file_id column already exists")
-        else:
-            raise
-    
-    try:
-        # Add deleted_rows to processing_jobs table
-        cursor.execute('''
-            ALTER TABLE processing_jobs ADD COLUMN deleted_rows INTEGER DEFAULT 0
-        ''')
-        print("✅ Added deleted_rows to processing_jobs table")
-    except sqlite3.OperationalError as e:
-        if "duplicate column name" in str(e):
-            print("⚠️  deleted_rows column already exists")
-        else:
-            raise
-    
-    try:
-        # Add filter_rules_json to processing_jobs table
-        cursor.execute('''
-            ALTER TABLE processing_jobs ADD COLUMN filter_rules_json TEXT
-        ''')
-        print("✅ Added filter_rules_json to processing_jobs table")
-    except sqlite3.OperationalError as e:
-        if "duplicate column name" in str(e):
-            print("⚠️  filter_rules_json column already exists")
-        else:
-            raise
-    
-    conn.commit()
-    conn.close()
-    
-    print("\n✅ Database migration complete!")
-
 if __name__ == '__main__':
-    migrate_database()
     app.run(debug=True)
