@@ -339,9 +339,9 @@ def upload_file():
         
         # Save to database with hash
         file_id = conn.execute(
-            '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, file_hash) 
-               VALUES (?, ?, ?, ?, ?)''',
-            (user_id, original_filename, stored_filename, file_size, file_hash)
+            '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, file_hash, file_type) 
+            VALUES (?, ?, ?, ?, ?, ?)''',
+            (user_id, original_filename, stored_filename, file_size, file_hash, 'original')
         ).lastrowid
         conn.commit()
         conn.close()
@@ -1343,10 +1343,15 @@ def process_file_automated(file_id):
 def processing_callback():
     """Receive results from GitHub Actions"""
     try:
-        # Verify the request is from GitHub (optional but recommended)
+        print("=== PROCESSING CALLBACK RECEIVED ===")
         
-        if request.content_type == 'application/json':
-            # Status update
+        # Check authentication token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        if request.content_type and 'application/json' in request.content_type:
+            # Status update (failure notification)
             data = request.get_json()
             job_id = data.get('job_id')
             status = data.get('status')
@@ -1356,56 +1361,89 @@ def processing_callback():
             if status == 'failed':
                 conn.execute(
                     '''UPDATE processing_jobs 
-                       SET status = ?, error_message = ?, completed_at = ?
+                       SET status = ?, error_message = ?
                        WHERE job_id = ?''',
-                    ('failed', error, datetime.utcnow(), job_id)
+                    ('failed', error, job_id)
                 )
-            conn.commit()
+                conn.commit()
             conn.close()
             
             return jsonify({'status': 'received'}), 200
             
         else:
-            # File upload
+            # File upload (success)
             job_id = request.form.get('job_id')
             uploaded_file = request.files.get('file')
+            deleted_rows = request.form.get('deleted_rows', 0)  # Get deleted_rows from form
+            
+            print(f"File upload: job_id={job_id}, deleted_rows={deleted_rows}")
             
             if not job_id or not uploaded_file:
                 return jsonify({'error': 'Missing job_id or file'}), 400
             
             # Save the processed file
-            output_filename = f"processed_{uuid.uuid4()}.xlsx"
+            file_extension = 'xlsx'
+            output_filename = f"processed_{uuid.uuid4().hex[:8]}.{file_extension}"
             output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
+            
             uploaded_file.save(output_path)
+            file_size = os.path.getsize(output_path)
+            print(f"File saved: {output_path}, size: {file_size} bytes")
             
             # Update database
             conn = get_db()
+            
+            # Get the job info
             job = conn.execute(
                 'SELECT * FROM processing_jobs WHERE job_id = ?', (job_id,)
             ).fetchone()
             
-            if job:
-                # Create file record
-                file_id = conn.execute(
-                    '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed)
-                       VALUES (?, ?, ?, ?, ?)''',
-                    (job['user_id'], f"processed_{job_id}.xlsx", output_filename, 
-                     os.path.getsize(output_path), True)
-                ).lastrowid
-                
-                # Update job status
-                conn.execute(
-                    '''UPDATE processing_jobs 
-                       SET status = ?, result_file_id = ?, completed_at = ?
-                       WHERE job_id = ?''',
-                    ('completed', file_id, datetime.utcnow(), job_id)
-                )
-                conn.commit()
+            if not job:
+                conn.close()
+                return jsonify({'error': 'Job not found'}), 404
             
+            # Get original filename
+            original_file = conn.execute(
+                'SELECT original_filename FROM files WHERE id = ?',
+                (job['original_file_id'],)
+            ).fetchone()
+            
+            original_filename = original_file['original_filename'] if original_file else 'processed.xlsx'
+            processed_filename = f"processed_{original_filename}"
+            
+            # Create file record for the processed file
+            # IMPORTANT: Link it to the original file with parent_file_id
+            file_id = conn.execute(
+                '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                (job['user_id'], processed_filename, output_filename, file_size, True, 'processed', job['original_file_id'])
+            ).lastrowid
+            
+            # Update job status with deleted_rows
+            conn.execute(
+                '''UPDATE processing_jobs 
+                   SET status = ?, result_file_id = ?, deleted_rows = ?
+                   WHERE job_id = ?''',
+                ('completed', file_id, deleted_rows, job_id)
+            )
+            
+            conn.commit()
             conn.close()
-            return jsonify({'status': 'received'}), 200
+            
+            print(f"=== CALLBACK SUCCESSFUL ===")
+            print(f"Job {job_id} completed, file_id={file_id}, parent_file_id={job['original_file_id']}, deleted_rows={deleted_rows}")
+            
+            return jsonify({
+                'status': 'success',
+                'file_id': file_id,
+                'filename': processed_filename
+            }), 200
             
     except Exception as e:
+        print(f"=== CALLBACK ERROR ===")
+        print(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/files/<int:file_id>/history', methods=['GET'])
