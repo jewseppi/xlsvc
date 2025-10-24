@@ -366,13 +366,11 @@ def get_files():
         
         conn = get_db()
         
-        # Get only ORIGINAL files (not processed ones)
+        # Get ALL files for this user
         files = conn.execute(
             '''SELECT f.* FROM files f
                JOIN users u ON f.user_id = u.id
-               WHERE u.email = ? 
-               AND (f.file_type = 'original' OR f.file_type IS NULL)
-               AND f.parent_file_id IS NULL
+               WHERE u.email = ?
                ORDER BY f.upload_date DESC''',
             (current_user_email,)
         ).fetchall()
@@ -398,6 +396,8 @@ def get_files():
         
     except Exception as e:
         print(f"DEBUG: get_files error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 # Update the process endpoint to use proper file organization
