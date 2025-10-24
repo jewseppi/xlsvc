@@ -63,7 +63,7 @@ jobs:
             -d "{\"job_id\":\"${{ github.event.client_payload.job_id }}\",\"status\":\"failed\",\"error\":\"GitHub Actions workflow failed\"}" \
             "${{ github.event.client_payload.callback_url }}"
 
-      - name: Upload as GitHub artifact (backup)
+      - name: Upload as GitHub artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
