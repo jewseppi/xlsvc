@@ -361,16 +361,18 @@ def upload_file():
 @app.route('/api/files', methods=['GET'])
 @jwt_required()
 def get_files():
-    """Get user's files with proper filtering"""
     try:
         current_user_email = get_jwt_identity()
         
         conn = get_db()
+        
+        # Get only ORIGINAL files (not processed ones)
         files = conn.execute(
-            '''SELECT f.id, f.original_filename, f.file_size, f.upload_date, f.processed, f.file_type, f.stored_filename
-               FROM files f
+            '''SELECT f.* FROM files f
                JOIN users u ON f.user_id = u.id
-               WHERE u.email = ? AND (f.file_type = 'original' OR f.file_type IS NULL)
+               WHERE u.email = ? 
+               AND (f.file_type = 'original' OR f.file_type IS NULL)
+               AND f.parent_file_id IS NULL
                ORDER BY f.upload_date DESC''',
             (current_user_email,)
         ).fetchall()
@@ -379,15 +381,8 @@ def get_files():
         valid_files = []
         for file in files:
             file_dict = dict(file)
-            
-            # Get the correct file path
-            file_type = file_dict.get('file_type') or 'original'
             stored_filename = file_dict.get('stored_filename', '')
-            
-            if file_type == 'original':
-                file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
-            else:
-                file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)  # fallback to uploads
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
             
             # Only include files that actually exist on disk
             if stored_filename and os.path.exists(file_path):
@@ -1268,16 +1263,16 @@ def process_file_automated(file_id):
         print(f"DEBUG: Generated job_id: {job_id}")
         print(f"DEBUG: Generated download token: {download_token[:20]}...")
         
-        # Store job in database
+        # Store job in database WITH filter rules
         conn.execute(
-            '''INSERT INTO processing_jobs (job_id, user_id, original_file_id, status)
-               VALUES (?, ?, ?, ?)''',
-            (job_id, user['id'], file_id, 'pending')
+            '''INSERT INTO processing_jobs (job_id, user_id, original_file_id, status, filter_rules_json)
+               VALUES (?, ?, ?, ?, ?)''',
+            (job_id, user['id'], file_id, 'pending', json.dumps(filter_rules))
         )
         conn.commit()
         conn.close()
         
-        print("DEBUG: Job stored in database")
+        print("DEBUG: Job stored in database with filter rules")
         
         # Get GitHub credentials
         app_id = os.getenv('GITHUB_APP_ID')
@@ -1285,26 +1280,14 @@ def process_file_automated(file_id):
         installation_id = os.getenv('GITHUB_INSTALLATION_ID')
         github_repo = os.getenv('GITHUB_REPO', 'jewseppi/xlsvc')
         
-        print(f"DEBUG: App ID: {app_id}")
-        print(f"DEBUG: Installation ID: {installation_id}")
-        print(f"DEBUG: GitHub Repo: {github_repo}")
-        
         if not app_id or not private_key or not installation_id:
-            print("DEBUG: Missing required environment variables")
             return jsonify({
-                'error': 'GitHub App configuration missing',
-                'details': {
-                    'app_id': bool(app_id),
-                    'private_key': bool(private_key),
-                    'installation_id': bool(installation_id)
-                }
+                'error': 'GitHub App configuration missing'
             }), 500
         
         # Get GitHub token
-        print("DEBUG: Getting GitHub token...")
         github_auth = GitHubAppAuth()
         github_token = github_auth.get_installation_token()
-        print(f"DEBUG: Got token: {github_token[:20]}...")
         
         # Prepare GitHub Actions payload with filter_rules
         base_url = request.host_url.rstrip('/')
@@ -1317,11 +1300,9 @@ def process_file_automated(file_id):
                 "callback_url": f"{base_url}/api/processing-callback",
                 "callback_token": callback_token,
                 "job_id": job_id,
-                "filter_rules": json.dumps(filter_rules)  # ADD THIS - pass filter rules as JSON string
+                "filter_rules": json.dumps(filter_rules)
             }
         }
-        
-        print(f"DEBUG: GitHub payload prepared with filter_rules")
         
         headers = {
             'Authorization': f'Bearer {github_token}',
@@ -1330,16 +1311,12 @@ def process_file_automated(file_id):
         }
         
         dispatch_url = f'https://api.github.com/repos/{github_repo}/dispatches'
-        print(f"DEBUG: Dispatching to: {dispatch_url}")
-        
         response = requests.post(
             dispatch_url,
             headers=headers,
             json=github_payload,
             timeout=30
         )
-        
-        print(f"DEBUG: GitHub API response: {response.status_code}")
         
         if response.status_code == 204:
             return jsonify({
@@ -1349,11 +1326,9 @@ def process_file_automated(file_id):
                 'estimated_time': '2-3 minutes'
             }), 202
         else:
-            print(f"DEBUG: GitHub API error: {response.text}")
             return jsonify({
                 'error': 'Failed to start GitHub Actions processing',
-                'details': response.text,
-                'status_code': response.status_code
+                'details': response.text
             }), 500
             
     except Exception as e:
@@ -1361,8 +1336,7 @@ def process_file_automated(file_id):
         import traceback
         traceback.print_exc()
         return jsonify({
-            'error': str(e),
-            'traceback': traceback.format_exc()
+            'error': str(e)
         }), 500
 
 @app.route('/api/processing-callback', methods=['POST'])
@@ -1432,6 +1406,82 @@ def processing_callback():
             return jsonify({'status': 'received'}), 200
             
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/files/<int:file_id>/history', methods=['GET'])
+@jwt_required()
+def get_file_history(file_id):
+    """Get all processed versions of a file"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        conn = get_db()
+        
+        # Verify user owns the original file
+        user = conn.execute(
+            'SELECT id FROM users WHERE email = ?', (current_user_email,)
+        ).fetchone()
+        
+        if not user:
+            conn.close()
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Check if the file exists and belongs to the user
+        original_file = conn.execute(
+            '''SELECT * FROM files 
+               WHERE id = ? AND user_id = ? AND (file_type = 'original' OR file_type IS NULL)''',
+            (file_id, user['id'])
+        ).fetchone()
+        
+        if not original_file:
+            conn.close()
+            return jsonify({'error': 'File not found'}), 404
+        
+        # Get all processing jobs for this file with their results
+        history = conn.execute(
+            '''SELECT 
+                pj.job_id,
+                pj.created_at as processed_at,
+                pj.status,
+                pj.deleted_rows,
+                pj.filter_rules_json,
+                pj.result_file_id,
+                f.original_filename as processed_filename,
+                f.file_size as processed_file_size
+               FROM processing_jobs pj
+               LEFT JOIN files f ON pj.result_file_id = f.id
+               WHERE pj.original_file_id = ? AND pj.user_id = ?
+               ORDER BY pj.created_at DESC''',
+            (file_id, user['id'])
+        ).fetchall()
+        
+        conn.close()
+        
+        # Format the history
+        history_list = []
+        for job in history:
+            job_dict = dict(job)
+            
+            # Parse filter rules if present
+            if job_dict.get('filter_rules_json'):
+                try:
+                    job_dict['filter_rules'] = json.loads(job_dict['filter_rules_json'])
+                except:
+                    job_dict['filter_rules'] = []
+            else:
+                job_dict['filter_rules'] = []
+            
+            history_list.append(job_dict)
+        
+        return jsonify({
+            'original_file': dict(original_file),
+            'history': history_list
+        }), 200
+        
+    except Exception as e:
+        print(f"ERROR: get_file_history: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/job-status/<job_id>', methods=['GET'])
@@ -1563,5 +1613,52 @@ def get_profile():
     current_user_email = get_jwt_identity()
     return jsonify({'email': current_user_email})
 
+def migrate_database():
+    """Add columns for tracking processing history"""
+    conn = sqlite3.connect('xlsvc.db')
+    cursor = conn.cursor()
+    
+    try:
+        # Add parent_file_id to files table
+        cursor.execute('''
+            ALTER TABLE files ADD COLUMN parent_file_id INTEGER
+        ''')
+        print("✅ Added parent_file_id to files table")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e):
+            print("⚠️  parent_file_id column already exists")
+        else:
+            raise
+    
+    try:
+        # Add deleted_rows to processing_jobs table
+        cursor.execute('''
+            ALTER TABLE processing_jobs ADD COLUMN deleted_rows INTEGER DEFAULT 0
+        ''')
+        print("✅ Added deleted_rows to processing_jobs table")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e):
+            print("⚠️  deleted_rows column already exists")
+        else:
+            raise
+    
+    try:
+        # Add filter_rules_json to processing_jobs table
+        cursor.execute('''
+            ALTER TABLE processing_jobs ADD COLUMN filter_rules_json TEXT
+        ''')
+        print("✅ Added filter_rules_json to processing_jobs table")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" in str(e):
+            print("⚠️  filter_rules_json column already exists")
+        else:
+            raise
+    
+    conn.commit()
+    conn.close()
+    
+    print("\n✅ Database migration complete!")
+
 if __name__ == '__main__':
+    migrate_database()
     app.run(debug=True)

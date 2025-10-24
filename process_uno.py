@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import json
+from com.sun.star.beans import PropertyValue
 
 def main():
     try:
@@ -28,23 +29,40 @@ def main():
         doc = desktop.loadComponentFromURL(file_url, "_blank", 0, ())
         print("Document loaded")
         
-        # Get filter rules from environment
+        # NEW: Get filter rules from environment
         filter_rules = get_filter_rules()
         print(f"Using {len(filter_rules)} filter rules:")
         for rule in filter_rules:
             print(f"  - Column {rule['column']} = '{rule['value']}'")
-
+        
         # Process directly with UNO API
         deleted_rows = delete_empty_rows_direct(doc, filter_rules)
         print(f"Deleted {deleted_rows} empty rows")
         
-        # Save the result
+        # Save the result with explicit Excel format for Numbers compatibility
         output_path = os.path.abspath("output.xlsx")
         output_url = uno.systemPathToFileUrl(output_path)
         print(f"Output URL: {output_url}")
         
-        doc.storeAsURL(output_url, ())
+        # Use explicit Excel 2007 XML filter for maximum compatibility
+        save_props = (
+            PropertyValue("Overwrite", 0, True, 0),
+            PropertyValue("FilterName", 0, "Calc MS Excel 2007 XML", 0),
+        )
+        
+        doc.storeToURL(output_url, save_props)
         doc.close(True)
+        
+        print("LibreOffice save complete. Normalizing format for Numbers compatibility...")
+        
+        # Round-trip through openpyxl to normalize the format
+        # This fixes minor XML inconsistencies that Numbers rejects
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        wb.save(output_path)
+        wb.close()
+        
+        print("Format normalized. File should now open in Numbers.")
         
         print(f"Processing complete. Deleted {deleted_rows} rows.")
         return 0
@@ -89,6 +107,10 @@ def column_to_index(col):
     return index - 1
 
 def delete_empty_rows_direct(doc, filter_rules):
+    """
+    Delete rows based on dynamic filter rules.
+    KEEPS YOUR EXACT WORKING LOGIC - just makes columns configurable.
+    """
     # Force calculation first
     doc.calculateAll()
     time.sleep(2)
@@ -104,7 +126,7 @@ def delete_empty_rows_direct(doc, filter_rules):
             sheet_name = sheet.getName()
             print(f"Processing sheet: {sheet_name}")
             
-            # Use fixed range instead of cursor
+            # Use fixed range instead of cursor (YOUR WORKING CODE)
             last_row = 1000  # Reasonable limit
             print(f"Checking up to row {last_row} in {sheet_name}")
             
@@ -112,18 +134,18 @@ def delete_empty_rows_direct(doc, filter_rules):
             
             for row in range(last_row - 1, -1, -1):
                 try:
-                    # Get column A value to identify the row
+                    # Get column A value to identify the row (YOUR WORKING CODE)
                     col_a_cell = sheet.getCellByPosition(0, row)
                     col_a_value = col_a_cell.getString().strip()
                     
-                    # Skip completely empty rows
+                    # Skip completely empty rows (YOUR WORKING CODE)
                     if not col_a_value:
                         continue
                     
                     all_empty = True
                     debug_values = []
                     
-                    # Check columns based on filter_rules instead of hardcoded F,G,H,I
+                    # NEW: Check columns based on filter_rules instead of hardcoded F,G,H,I
                     for rule in filter_rules:
                         try:
                             col_index = column_to_index(rule['column'])
@@ -145,6 +167,10 @@ def delete_empty_rows_direct(doc, filter_rules):
                             all_empty = False
                             break
                     
+                    # Debug output for rows containing "E-ST" (YOUR WORKING CODE)
+                    if "E-ST" in col_a_value:
+                        print(f"DEBUG Row {row+1} ({col_a_value}): {' | '.join(debug_values)} -> DELETE={all_empty}")
+                    
                     if all_empty:
                         rows_to_delete.append(row)
                         
@@ -153,7 +179,7 @@ def delete_empty_rows_direct(doc, filter_rules):
             
             print(f"Found {len(rows_to_delete)} empty rows to delete in {sheet_name}")
             
-            # Delete rows
+            # Delete rows (YOUR WORKING CODE)
             for row in rows_to_delete:
                 try:
                     sheet.getRows().removeByIndex(row, 1)

@@ -13,10 +13,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install LibreOffice
+      - name: Install LibreOffice and Python dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libreoffice python3-uno
+          sudo apt-get install -y libreoffice python3-uno python3-pip
+          pip3 install openpyxl
 
       - name: Download input file
         run: |
@@ -31,7 +32,17 @@ jobs:
       - name: Process Excel file with UNO
         env:
           FILTER_RULES: ${{ github.event.client_payload.filter_rules }}
-        run: python3 process_uno.py
+        run: |
+          python3 process_uno.py > process_output.log 2>&1
+          cat process_output.log
+
+      - name: Extract deleted rows count
+        id: extract_count
+        run: |
+          # Extract the deleted rows count from the output
+          DELETED_ROWS=$(grep "Deleted" process_output.log | grep -oP '\d+' | head -1)
+          echo "deleted_rows=$DELETED_ROWS" >> $GITHUB_OUTPUT
+          echo "Deleted rows: $DELETED_ROWS"
 
       - name: Upload processed file back to server
         if: success()
@@ -40,10 +51,11 @@ jobs:
             echo "✅ Processing successful - uploading to server"
             echo "Output file size: $(stat -c%s output.xlsx) bytes"
             
-            # Upload the file back to the callback URL
+            # Upload the file back to the callback URL with deleted_rows count
             curl -X POST \
               -F "job_id=${{ github.event.client_payload.job_id }}" \
               -F "file=@output.xlsx" \
+              -F "deleted_rows=${{ steps.extract_count.outputs.deleted_rows }}" \
               -H "Authorization: Bearer ${{ github.event.client_payload.callback_token }}" \
               "${{ github.event.client_payload.callback_url }}"
             
@@ -68,6 +80,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: processed-excel-${{ github.event.client_payload.job_id }}
-          path: output.xlsx
+          path: |
+            output.xlsx
+            process_output.log
           retention-days: 7
           if-no-files-found: warn
