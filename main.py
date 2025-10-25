@@ -840,22 +840,7 @@ def download_file_with_token(file_id):
         )
         
         if not os.path.exists(file_path):
-            print(f"DEBUG: Removing missing file from DB: {stored_filename}")
-            
-            # Get file_type from the dict
-            file_type = file_dict.get('file_type') or 'original'
-            
-            # NEW: Delete related processing jobs FIRST (before deleting file)
-            if file_type == 'processed':
-                conn.execute(
-                    'DELETE FROM processing_jobs WHERE result_file_id = ?',
-                    (file_dict['id'],)
-                )
-                print(f"DEBUG: Deleted processing job for file_id {file_dict['id']}")
-            
-            # Then delete the file record
-            conn.execute('DELETE FROM files WHERE id = ?', (file_dict['id'],))
-            removed_count += 1
+            return jsonify({'error': 'File not found on disk'}), 404
         
         # Determine MIME type
         original_filename = file_info['original_filename']
@@ -946,6 +931,8 @@ def cleanup_files():
         ).fetchall()
         
         removed_count = 0
+        
+        # Clean up files that don't exist on disk
         for file in files:
             file_dict = dict(file)
             file_type = file_dict.get('file_type') or 'original'
@@ -963,23 +950,39 @@ def cleanup_files():
             if not os.path.exists(file_path):
                 print(f"DEBUG: Removing missing file from DB: {stored_filename}")
                 
-                # NEW: Also delete related processing jobs
+                # Delete related processing jobs FIRST (before deleting file)
                 if file_type == 'processed':
-                    # Delete jobs that produced this file
                     conn.execute(
                         'DELETE FROM processing_jobs WHERE result_file_id = ?',
                         (file_dict['id'],)
                     )
+                    print(f"DEBUG: Deleted processing job for file_id {file_dict['id']}")
                 
-                # Delete the file record
+                # Then delete the file record
                 conn.execute('DELETE FROM files WHERE id = ?', (file_dict['id'],))
                 removed_count += 1
+        
+        # NEW: Also clean up orphaned processing jobs (where result_file_id doesn't exist)
+        orphaned_jobs = conn.execute(
+            '''SELECT pj.job_id, pj.result_file_id 
+               FROM processing_jobs pj
+               WHERE pj.user_id = ? AND pj.result_file_id IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM files f WHERE f.id = pj.result_file_id
+               )''',
+            (user['id'],)
+        ).fetchall()
+
+        for job in orphaned_jobs:
+            print(f"DEBUG: Removing orphaned job {job['job_id']} with missing file_id {job['result_file_id']}")
+            conn.execute('DELETE FROM processing_jobs WHERE job_id = ?', (job['job_id'],))
+            removed_count += 1
         
         conn.commit()
         conn.close()
         
         return jsonify({
-            'message': f'Cleaned up {removed_count} missing files and their jobs',
+            'message': f'Cleaned up {removed_count} missing files and orphaned jobs',
             'removed_count': removed_count
         }), 200
         
