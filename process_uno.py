@@ -56,15 +56,7 @@ def main():
         doc.storeToURL(output_url, save_props)
         doc.close(True)
         
-        print("LibreOffice save complete. Normalizing format...")
-        
-        # Normalize with openpyxl
-        from openpyxl import load_workbook
-        wb = load_workbook(output_path, data_only=True, keep_vba=False)
-        wb.save(output_path)
-        wb.close()
-        
-        print("Format normalized.")
+        print("LibreOffice save complete.")
         
         # Generate deletion report
         print("Generating deletion report...")
