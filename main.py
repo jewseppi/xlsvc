@@ -872,7 +872,7 @@ def download_file(file_id):
 @app.route('/api/cleanup-files', methods=['POST'])
 @jwt_required()
 def cleanup_files():
-    """Remove database entries for files that no longer exist on disk"""
+    """Remove database entries for files AND their jobs that no longer exist on disk"""
     try:
         current_user_email = get_jwt_identity()
         
@@ -888,23 +888,31 @@ def cleanup_files():
         
         removed_count = 0
         for file in files:
-            file_dict = dict(file)  # Convert sqlite3.Row to dict
-            
-            # Get the correct file path
+            file_dict = dict(file)
             file_type = file_dict.get('file_type') or 'original'
             stored_filename = file_dict.get('stored_filename', '')
             
             if file_type == 'original':
                 file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
             elif file_type == 'processed':
-                file_path = os.path.join(app.config.get('PROCESSED_FOLDER', 'uploads'), stored_filename)
+                file_path = os.path.join(app.config['PROCESSED_FOLDER'], stored_filename)
             elif file_type in ['macro', 'instructions']:
-                file_path = os.path.join(app.config.get('MACROS_FOLDER', 'uploads'), stored_filename)
+                file_path = os.path.join(app.config['MACROS_FOLDER'], stored_filename)
             else:
                 file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
             
             if not os.path.exists(file_path):
                 print(f"DEBUG: Removing missing file from DB: {stored_filename}")
+                
+                # NEW: Also delete related processing jobs
+                if file_type == 'processed':
+                    # Delete jobs that produced this file
+                    conn.execute(
+                        'DELETE FROM processing_jobs WHERE result_file_id = ?',
+                        (file_dict['id'],)
+                    )
+                
+                # Delete the file record
                 conn.execute('DELETE FROM files WHERE id = ?', (file_dict['id'],))
                 removed_count += 1
         
@@ -912,7 +920,7 @@ def cleanup_files():
         conn.close()
         
         return jsonify({
-            'message': f'Cleaned up {removed_count} missing files',
+            'message': f'Cleaned up {removed_count} missing files and their jobs',
             'removed_count': removed_count
         }), 200
         
