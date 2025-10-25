@@ -5,6 +5,10 @@ import time
 import json
 from com.sun.star.beans import PropertyValue
 
+# Import the deletion report module
+sys.path.append('.')
+from deletion_report import generate_deletion_report
+
 def main():
     try:
         print("UNO script starting...")
@@ -29,22 +33,21 @@ def main():
         doc = desktop.loadComponentFromURL(file_url, "_blank", 0, ())
         print("Document loaded")
         
-        # NEW: Get filter rules from environment
+        # Get filter rules
         filter_rules = get_filter_rules()
         print(f"Using {len(filter_rules)} filter rules:")
         for rule in filter_rules:
             print(f"  - Column {rule['column']} = '{rule['value']}'")
         
-        # Process directly with UNO API
-        deleted_rows = delete_empty_rows_direct(doc, filter_rules)
+        # Process and capture deleted row data
+        deleted_rows, deleted_data = delete_empty_rows_direct(doc, filter_rules)
         print(f"Deleted {deleted_rows} empty rows")
         
-        # Save the result with explicit Excel format for Numbers compatibility
+        # Save processed file
         output_path = os.path.abspath("output.xlsx")
         output_url = uno.systemPathToFileUrl(output_path)
         print(f"Output URL: {output_url}")
         
-        # Use explicit Excel 2007 XML filter for maximum compatibility
         save_props = (
             PropertyValue("Overwrite", 0, True, 0),
             PropertyValue("FilterName", 0, "Calc MS Excel 2007 XML", 0),
@@ -53,16 +56,23 @@ def main():
         doc.storeToURL(output_url, save_props)
         doc.close(True)
         
-        print("LibreOffice save complete. Normalizing format for Numbers compatibility...")
+        print("LibreOffice save complete. Normalizing format...")
         
-        # Round-trip through openpyxl to normalize the format
-        # This fixes minor XML inconsistencies that Numbers rejects
+        # Normalize with openpyxl
         from openpyxl import load_workbook
         wb = load_workbook(output_path, data_only=True, keep_vba=False)
         wb.save(output_path)
         wb.close()
         
-        print("Format normalized. File should now open in Numbers.")
+        print("Format normalized.")
+        
+        # Generate deletion report
+        print("Generating deletion report...")
+        report_path = generate_deletion_report(deleted_data, "deletion_report.xlsx")
+        if report_path:
+            print(f"Deletion report created: {report_path}")
+        else:
+            print("No deletion report generated (no data)")
         
         print(f"Processing complete. Deleted {deleted_rows} rows.")
         return 0
@@ -74,7 +84,7 @@ def main():
         return 1
 
 def get_filter_rules():
-    """Get filter rules from environment variable - frontend always provides them"""
+    """Get filter rules from environment variable"""
     filter_rules_json = os.getenv('FILTER_RULES')
     
     if not filter_rules_json:
@@ -95,11 +105,9 @@ def column_to_index(col):
     """Convert column letter or number to zero-based index"""
     col = str(col).strip().upper()
     
-    # If it's already a number, convert directly
     if col.isdigit():
         return int(col) - 1
     
-    # Convert letter(s) to index (A=0, B=1, ... Z=25, AA=26, etc.)
     index = 0
     for char in col:
         if char.isalpha():
@@ -108,14 +116,14 @@ def column_to_index(col):
 
 def delete_empty_rows_direct(doc, filter_rules):
     """
-    Delete rows based on dynamic filter rules.
-    KEEPS YOUR EXACT WORKING LOGIC - just makes columns configurable.
+    Delete rows based on filter rules and capture data for report.
+    Returns: (deleted_count, deleted_data_dict)
     """
-    # Force calculation first
     doc.calculateAll()
     time.sleep(2)
     
     deleted_count = 0
+    deleted_data = {}  # {sheet_name: [row_data]}
     
     try:
         sheets = doc.getSheets()
@@ -126,26 +134,26 @@ def delete_empty_rows_direct(doc, filter_rules):
             sheet_name = sheet.getName()
             print(f"Processing sheet: {sheet_name}")
             
-            # Use fixed range instead of cursor (YOUR WORKING CODE)
-            last_row = 1000  # Reasonable limit
+            last_row = 1000
             print(f"Checking up to row {last_row} in {sheet_name}")
             
             rows_to_delete = []
+            sheet_deleted_data = []
             
             for row in range(last_row - 1, -1, -1):
                 try:
-                    # Get column A value to identify the row (YOUR WORKING CODE)
+                    # Get column A to check if row has data
                     col_a_cell = sheet.getCellByPosition(0, row)
                     col_a_value = col_a_cell.getString().strip()
                     
-                    # Skip completely empty rows (YOUR WORKING CODE)
+                    # Skip completely empty rows
                     if not col_a_value:
                         continue
                     
                     all_empty = True
                     debug_values = []
                     
-                    # NEW: Check columns based on filter_rules instead of hardcoded F,G,H,I
+                    # Check columns based on filter_rules
                     for rule in filter_rules:
                         try:
                             col_index = column_to_index(rule['column'])
@@ -157,21 +165,42 @@ def delete_empty_rows_direct(doc, filter_rules):
                             
                             debug_values.append(f"{rule['column']}={cell_value}|'{cell_string}'")
                             
-                            # YOUR EXACT WORKING LOGIC for checking if empty
                             is_empty = (cell_value == 0 or cell_value == 0.0) and (cell_string == "" or cell_string == "0")
                             
                             if not is_empty:
                                 all_empty = False
+                                break
                                 
                         except Exception as e:
                             all_empty = False
                             break
                     
-                    # Debug output for rows containing "E-ST" (YOUR WORKING CODE)
+                    # Debug output for specific rows
                     if "E-ST" in col_a_value:
                         print(f"DEBUG Row {row+1} ({col_a_value}): {' | '.join(debug_values)} -> DELETE={all_empty}")
                     
                     if all_empty:
+                        # Capture row data before deletion
+                        row_data = {
+                            'row_number': row + 1,  # 1-based for display
+                            'data': []
+                        }
+                        
+                        # Get all cell values
+                        max_cols = 50
+                        for col in range(max_cols):
+                            try:
+                                cell = sheet.getCellByPosition(col, row)
+                                value = cell.getString() if cell.getString() else cell.getValue()
+                                row_data['data'].append(value if value else '')
+                            except:
+                                break
+                        
+                        # Trim trailing empty cells
+                        while row_data['data'] and row_data['data'][-1] == '':
+                            row_data['data'].pop()
+                        
+                        sheet_deleted_data.append(row_data)
                         rows_to_delete.append(row)
                         
                 except Exception:
@@ -179,7 +208,10 @@ def delete_empty_rows_direct(doc, filter_rules):
             
             print(f"Found {len(rows_to_delete)} empty rows to delete in {sheet_name}")
             
-            # Delete rows (YOUR WORKING CODE)
+            if sheet_deleted_data:
+                deleted_data[sheet_name] = sheet_deleted_data
+            
+            # Delete rows
             for row in rows_to_delete:
                 try:
                     sheet.getRows().removeByIndex(row, 1)
@@ -192,7 +224,7 @@ def delete_empty_rows_direct(doc, filter_rules):
         import traceback
         traceback.print_exc()
     
-    return deleted_count
+    return deleted_count, deleted_data
 
 if __name__ == "__main__":
     exit_code = main()

@@ -1,3 +1,4 @@
+from deletion_report import generate_deletion_report, capture_row_data
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
@@ -54,7 +55,7 @@ def get_file_path(file_type, filename):
         return os.path.join(app.config['UPLOAD_FOLDER'], filename)
     elif file_type == 'processed':
         return os.path.join(app.config['PROCESSED_FOLDER'], filename)
-    elif file_type in ['macro', 'instructions']:
+    elif file_type in ['macro', 'instructions', 'report']:
         return os.path.join(app.config['MACROS_FOLDER'], filename)
     else:
         return os.path.join(app.config['UPLOAD_FOLDER'], filename)
@@ -185,6 +186,15 @@ def init_db():
         else:
             raise
     
+    # Add report_file_id column to processing_jobs
+    try:
+        cursor.execute('ALTER TABLE processing_jobs ADD COLUMN report_file_id INTEGER')
+        print("✅ Added report_file_id column to processing_jobs")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise
+        print("⚠️  report_file_id column already exists")
+
     conn.commit()
     conn.close()
 
@@ -438,26 +448,22 @@ def get_files():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-# Update the process endpoint to use proper file organization
 @app.route('/api/process/<int:file_id>', methods=['POST'])
 @jwt_required()
 def process_file(file_id):
     try:
         current_user_email = get_jwt_identity()
         
-        # NEW: Get filter rules from request body
+        # Get filter rules from request body
         data = request.get_json() or {}
         filter_rules = data.get('filter_rules', [])
         
-        # Validate filter rules
         if not filter_rules or len(filter_rules) == 0:
             return jsonify({
                 'error': 'filter_rules required and must be a non-empty array'
             }), 400
         
         print(f"DEBUG: Manual processing with {len(filter_rules)} filter rules")
-        for rule in filter_rules:
-            print(f"DEBUG: Rule: Column {rule.get('column')} = '{rule.get('value')}'")
         
         # Get file info and verify ownership
         conn = get_db()
@@ -477,9 +483,10 @@ def process_file(file_id):
         if not os.path.exists(input_path):
             return jsonify({'error': 'File not found on disk'}), 404
         
-        # Analyze the Excel file to find rows to delete
+        # Analyze the Excel file
         processing_log = []
         rows_to_delete_by_sheet = {}
+        deleted_rows_data = {}  # ← NEW: For report generation
         total_rows_to_delete = 0
         
         try:
@@ -493,26 +500,36 @@ def process_file(file_id):
                 max_row = sheet.max_row
                 
                 for row_num in range(1, max_row + 1):
-                    # NEW: Check columns dynamically based on filter_rules
+                    # Check columns dynamically based on filter_rules
                     all_match = True
                     
                     for rule in filter_rules:
                         column = rule.get('column')
                         expected_value = rule.get('value')
-                        
-                        # Convert column letter/number to index
                         col_index = column_to_index(column)
-                        
-                        # Get cell value
                         cell_val = sheet.cell(row=row_num, column=col_index).value
                         
-                        # Check if matches the rule
-                        if not is_empty_or_zero(cell_val) if expected_value == '0' else cell_val != expected_value:
-                            all_match = False
-                            break
+                        if expected_value == '0':
+                            if not is_empty_or_zero(cell_val):
+                                all_match = False
+                                break
+                        else:
+                            if cell_val != expected_value:
+                                all_match = False
+                                break
                     
                     if all_match:
                         rows_to_delete.append(row_num)
+                        
+                        # ← NEW: Capture row data for report
+                        if sheet_name not in deleted_rows_data:
+                            deleted_rows_data[sheet_name] = []
+                        
+                        deleted_rows_data[sheet_name].append({
+                            'row_number': row_num,
+                            'data': capture_row_data(sheet, row_num)
+                        })
+                        
                         if len(rows_to_delete) <= 5:
                             processing_log.append(f"Row {row_num} marked for deletion")
                 
@@ -535,35 +552,46 @@ def process_file(file_id):
                     'processing_log': processing_log + ["Analysis complete - no changes needed"]
                 }), 200
             
-            # NEW: Pass filter_rules to macro generator
+            # Generate macro
             macro_content = generate_libreoffice_macro(
                 file_dict['original_filename'], 
                 rows_to_delete_by_sheet,
-                filter_rules  # ← Add this parameter
+                filter_rules
             )
             
-            # Save macro file
             macro_filename = f"macro_{uuid.uuid4().hex[:8]}.bas"
             macro_path = os.path.join(app.config['MACROS_FOLDER'], macro_filename)
-            
             with open(macro_path, 'w', encoding='utf-8') as f:
                 f.write(macro_content)
             
-            # Generate instruction guide
+            # Generate instructions
             instructions = generate_instructions(
                 file_dict['original_filename'],
                 total_rows_to_delete,
                 list(rows_to_delete_by_sheet.keys()),
-                filter_rules  # ← Add this parameter
+                filter_rules
             )
             
             instructions_filename = f"instructions_{uuid.uuid4().hex[:8]}.txt"
             instructions_path = os.path.join(app.config['MACROS_FOLDER'], instructions_filename)
-            
             with open(instructions_path, 'w', encoding='utf-8') as f:
                 f.write(instructions)
             
-            # Record in database
+            # ← NEW: Generate deletion report
+            report_filename = f"deletion_report_{uuid.uuid4().hex[:8]}.xlsx"
+            report_path = os.path.join(app.config['MACROS_FOLDER'], report_filename)
+            
+            report_file_id = None
+            if generate_deletion_report(deleted_rows_data, report_path):
+                report_file_id = conn.execute(
+                    '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type) 
+                       VALUES (?, ?, ?, ?, ?, ?)''',
+                    (file_dict['user_id'], f"DeletionReport_{file_dict['original_filename']}", 
+                     report_filename, os.path.getsize(report_path), True, 'report')
+                ).lastrowid
+                processing_log.append("Deletion report generated")
+            
+            # Record macro and instructions in database
             macro_file_id = conn.execute(
                 '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type) 
                    VALUES (?, ?, ?, ?, ?, ?)''',
@@ -582,7 +610,7 @@ def process_file(file_id):
             conn.commit()
             conn.close()
             
-            processing_log.append("Analysis complete - macro and instructions generated")
+            processing_log.append("Analysis complete - all files generated")
             
             return jsonify({
                 'message': 'Analysis complete',
@@ -597,7 +625,11 @@ def process_file(file_id):
                     'instructions': {
                         'file_id': instructions_file_id,
                         'filename': f"Instructions_{file_dict['original_filename']}.txt"
-                    }
+                    },
+                    'report': {
+                        'file_id': report_file_id,
+                        'filename': f"DeletionReport_{file_dict['original_filename']}"
+                    } if report_file_id else None
                 }
             }), 200
             
@@ -1453,7 +1485,7 @@ def processing_callback():
     try:
         print("=== PROCESSING CALLBACK RECEIVED ===")
         
-        # Check authentication token
+        # Check authentication
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({'error': 'Unauthorized'}), 401
@@ -1473,80 +1505,101 @@ def processing_callback():
                        WHERE job_id = ?''',
                     ('failed', error, job_id)
                 )
-                conn.commit()
-            conn.close()
-            
-            return jsonify({'status': 'received'}), 200
-            
-        else:
-            # File upload (success)
-            job_id = request.form.get('job_id')
-            uploaded_file = request.files.get('file')
-            deleted_rows = request.form.get('deleted_rows', 0)  # Get deleted_rows from form
-            
-            print(f"File upload: job_id={job_id}, deleted_rows={deleted_rows}")
-            
-            if not job_id or not uploaded_file:
-                return jsonify({'error': 'Missing job_id or file'}), 400
-            
-            # Save the processed file
-            file_extension = 'xlsx'
-            output_filename = f"processed_{uuid.uuid4().hex[:8]}.{file_extension}"
-            output_path = os.path.join(app.config['PROCESSED_FOLDER'], output_filename)
-            
-            uploaded_file.save(output_path)
-            file_size = os.path.getsize(output_path)
-            print(f"File saved: {output_path}, size: {file_size} bytes")
-            
-            # Update database
-            conn = get_db()
-            
-            # Get the job info
-            job = conn.execute(
-                'SELECT * FROM processing_jobs WHERE job_id = ?', (job_id,)
-            ).fetchone()
-            
-            if not job:
-                conn.close()
-                return jsonify({'error': 'Job not found'}), 404
-            
-            # Get original filename
-            original_file = conn.execute(
-                'SELECT original_filename FROM files WHERE id = ?',
-                (job['original_file_id'],)
-            ).fetchone()
-            
-            original_filename = original_file['original_filename'] if original_file else 'processed.xlsx'
-            processed_filename = f"processed_{original_filename}"
-            
-            # Create file record for the processed file
-            # IMPORTANT: Link it to the original file with parent_file_id
-            file_id = conn.execute(
-                '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                (job['user_id'], processed_filename, output_filename, file_size, True, 'processed', job['original_file_id'])
-            ).lastrowid
-            
-            # Update job status with deleted_rows
-            conn.execute(
-                '''UPDATE processing_jobs 
-                   SET status = ?, result_file_id = ?, deleted_rows = ?
-                   WHERE job_id = ?''',
-                ('completed', file_id, deleted_rows, job_id)
-            )
-            
             conn.commit()
             conn.close()
             
-            print(f"=== CALLBACK SUCCESSFUL ===")
-            print(f"Job {job_id} completed, file_id={file_id}, parent_file_id={job['original_file_id']}, deleted_rows={deleted_rows}")
+            return jsonify({'status': 'updated'}), 200
+        
+        # File upload (success)
+        job_id = request.form.get('job_id')
+        uploaded_file = request.files.get('file')
+        report_file = request.files.get('report')  # ← NEW
+        deleted_rows = request.form.get('deleted_rows', 0)
+        
+        if not job_id or not uploaded_file:
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        # Get job info
+        conn = get_db()
+        job = conn.execute(
+            'SELECT * FROM processing_jobs WHERE job_id = ?',
+            (job_id,)
+        ).fetchone()
+        
+        if not job:
+            conn.close()
+            return jsonify({'error': 'Job not found'}), 404
+        
+        job = dict(job)
+        
+        # Get original file info
+        original_file = conn.execute(
+            'SELECT * FROM files WHERE id = ?',
+            (job['original_file_id'],)
+        ).fetchone()
+        
+        if not original_file:
+            conn.close()
+            return jsonify({'error': 'Original file not found'}), 404
+        
+        original_filename = original_file['original_filename']
+        
+        # Save processed file
+        file_extension = 'xlsx'
+        processed_filename = f"processed_{original_filename}"
+        output_filename = f"processed_{uuid.uuid4().hex[:8]}.{file_extension}"
+        output_path = os.path.join(app.config['PROCESSED_FOLDER'], output_filename)
+        
+        uploaded_file.save(output_path)
+        file_size = os.path.getsize(output_path)
+        
+        print(f"Processed file saved: {output_path}, size: {file_size} bytes")
+        
+        # Create file record for processed file
+        file_id = conn.execute(
+            '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id) 
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            (job['user_id'], processed_filename, output_filename, file_size, True, 'processed', job['original_file_id'])
+        ).lastrowid
+        
+        # ← NEW: Save deletion report if provided
+        report_file_id = None
+        if report_file:
+            report_filename = f"deletion_report_{uuid.uuid4().hex[:8]}.xlsx"
+            report_path = os.path.join(app.config['MACROS_FOLDER'], report_filename)
             
-            return jsonify({
-                'status': 'success',
-                'file_id': file_id,
-                'filename': processed_filename
-            }), 200
+            report_file.save(report_path)
+            report_size = os.path.getsize(report_path)
+            print(f"Deletion report saved: {report_path}, size: {report_size} bytes")
             
+            # Create file record for report
+            report_file_id = conn.execute(
+                '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                (job['user_id'], f"DeletionReport_{original_filename}", report_filename, report_size, True, 'report', job['original_file_id'])
+            ).lastrowid
+        
+        # Update job status with report_file_id
+        conn.execute(
+            '''UPDATE processing_jobs 
+               SET status = ?, result_file_id = ?, deleted_rows = ?, report_file_id = ?
+               WHERE job_id = ?''',
+            ('completed', file_id, deleted_rows, report_file_id, job_id)
+        )
+        
+        conn.commit()
+        conn.close()
+        
+        print(f"=== CALLBACK SUCCESSFUL ===")
+        print(f"Job {job_id} completed, file_id={file_id}, report_file_id={report_file_id}, deleted_rows={deleted_rows}")
+        
+        return jsonify({
+            'status': 'success',
+            'file_id': file_id,
+            'filename': processed_filename,
+            'report_file_id': report_file_id
+        }), 200
+        
     except Exception as e:
         print(f"=== CALLBACK ERROR ===")
         print(f"Error: {str(e)}")
@@ -1592,12 +1645,13 @@ def get_file_history(file_id):
                 pj.deleted_rows,
                 pj.filter_rules_json,
                 pj.result_file_id,
+                pj.report_file_id,
                 f.original_filename as processed_filename,
                 f.file_size as processed_file_size
-               FROM processing_jobs pj
-               LEFT JOIN files f ON pj.result_file_id = f.id
-               WHERE pj.original_file_id = ? AND pj.user_id = ?
-               ORDER BY pj.created_at DESC''',
+            FROM processing_jobs pj
+            LEFT JOIN files f ON pj.result_file_id = f.id
+            WHERE pj.original_file_id = ? AND pj.user_id = ?
+            ORDER BY pj.created_at DESC''',
             (file_id, user['id'])
         ).fetchall()
         

@@ -51,10 +51,20 @@ jobs:
             echo "✅ Processing successful - uploading to server"
             echo "Output file size: $(stat -c%s output.xlsx) bytes"
             
-            # Upload the file back to the callback URL with deleted_rows count
+            # Check if deletion report was generated
+            if [ -f "deletion_report.xlsx" ]; then
+              echo "📊 Deletion report found, size: $(stat -c%s deletion_report.xlsx) bytes"
+              REPORT_FLAG="-F report=@deletion_report.xlsx"
+            else
+              echo "⚠️  No deletion report generated"
+              REPORT_FLAG=""
+            fi
+            
+            # Upload processed file and report (if it exists)
             curl -X POST \
               -F "job_id=${{ github.event.client_payload.job_id }}" \
               -F "file=@output.xlsx" \
+              $REPORT_FLAG \
               -F "deleted_rows=${{ steps.extract_count.outputs.deleted_rows }}" \
               -H "Authorization: Bearer ${{ github.event.client_payload.callback_token }}" \
               "${{ github.event.client_payload.callback_url }}"
