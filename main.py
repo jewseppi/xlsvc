@@ -24,6 +24,7 @@ app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['PROCESSED_FOLDER'] = 'processed'
 app.config['MACROS_FOLDER'] = 'macros'
+app.config['REPORTS_FOLDER'] = 'reports'
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 
 # Initialize extensions
@@ -44,7 +45,8 @@ def ensure_directories():
     dirs = [
         app.config['UPLOAD_FOLDER'],
         app.config['PROCESSED_FOLDER'], 
-        app.config['MACROS_FOLDER']
+        app.config['MACROS_FOLDER'],
+        app.config['REPORTS_FOLDER']
     ]
     for dir_path in dirs:
         os.makedirs(dir_path, exist_ok=True)
@@ -55,8 +57,10 @@ def get_file_path(file_type, filename):
         return os.path.join(app.config['UPLOAD_FOLDER'], filename)
     elif file_type == 'processed':
         return os.path.join(app.config['PROCESSED_FOLDER'], filename)
-    elif file_type in ['macro', 'instructions', 'report']:
+    elif file_type in ['macro', 'instructions']:
         return os.path.join(app.config['MACROS_FOLDER'], filename)
+    elif file_type == 'report':
+        return os.path.join(app.config['REPORTS_FOLDER'], filename)
     else:
         return os.path.join(app.config['UPLOAD_FOLDER'], filename)
     
@@ -579,14 +583,14 @@ def process_file(file_id):
             
             # ← NEW: Generate deletion report
             report_filename = f"deletion_report_{uuid.uuid4().hex[:8]}.xlsx"
-            report_path = os.path.join(app.config['MACROS_FOLDER'], report_filename)
+            report_path = os.path.join(app.config['REPORTS_FOLDER'], report_filename)
             
             report_file_id = None
             if generate_deletion_report(deleted_rows_data, report_path):
                 report_file_id = conn.execute(
                     '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type) 
                        VALUES (?, ?, ?, ?, ?, ?)''',
-                    (file_dict['user_id'], f"DeletionReport_{file_dict['original_filename']}", 
+                    (file_dict['user_id'], f"DeletionReport_Manual_{file_dict['original_filename']}", 
                      report_filename, os.path.getsize(report_path), True, 'report')
                 ).lastrowid
                 processing_log.append("Deletion report generated")
@@ -976,6 +980,8 @@ def cleanup_files():
                 file_path = os.path.join(app.config['PROCESSED_FOLDER'], stored_filename)
             elif file_type in ['macro', 'instructions']:
                 file_path = os.path.join(app.config['MACROS_FOLDER'], stored_filename)
+            elif file_type == 'report':  # ← ADD THIS
+                file_path = os.path.join(app.config['REPORTS_FOLDER'], stored_filename)
             else:
                 file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
             
@@ -1566,7 +1572,7 @@ def processing_callback():
         report_file_id = None
         if report_file:
             report_filename = f"deletion_report_{uuid.uuid4().hex[:8]}.xlsx"
-            report_path = os.path.join(app.config['MACROS_FOLDER'], report_filename)
+            report_path = os.path.join(app.config['REPORTS_FOLDER'], report_filename)
             
             report_file.save(report_path)
             report_size = os.path.getsize(report_path)
@@ -1576,7 +1582,7 @@ def processing_callback():
             report_file_id = conn.execute(
                 '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id) 
                    VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                (job['user_id'], f"DeletionReport_{original_filename}", report_filename, report_size, True, 'report', job['original_file_id'])
+                (job['user_id'], f"DeletionReport_Automated_{original_filename}", report_filename, report_size, True, 'report', job['original_file_id'])
             ).lastrowid
         
         # Update job status with report_file_id
