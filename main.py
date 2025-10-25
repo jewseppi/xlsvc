@@ -1802,6 +1802,91 @@ def get_macro_for_file(file_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/files/<int:file_id>/generated', methods=['GET'])
+@jwt_required()
+def get_generated_files(file_id):
+    """Get all generated files (macros, instructions, reports) for a file"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        conn = get_db()
+        
+        # Verify user owns the file
+        user = conn.execute(
+            'SELECT id FROM users WHERE email = ?', (current_user_email,)
+        ).fetchone()
+        
+        if not user:
+            conn.close()
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Check if file exists and belongs to user
+        original_file = conn.execute(
+            '''SELECT * FROM files 
+               WHERE id = ? AND user_id = ? AND (file_type = 'original' OR file_type IS NULL)''',
+            (file_id, user['id'])
+        ).fetchone()
+        
+        if not original_file:
+            conn.close()
+            return jsonify({'error': 'File not found'}), 404
+        
+        # Get all generated files for this parent file
+        # This includes files directly referencing this file_id in various ways
+        
+        # Get macros, instructions, and reports that have parent_file_id set
+        generated_with_parent = conn.execute(
+            '''SELECT id, original_filename, file_type, file_size, upload_date 
+               FROM files 
+               WHERE parent_file_id = ? AND user_id = ?
+               AND file_type IN ('macro', 'instructions', 'report')
+               ORDER BY upload_date DESC''',
+            (file_id, user['id'])
+        ).fetchall()
+        
+        # Also get files that match the naming pattern (for older files without parent_file_id)
+        original_filename = original_file['original_filename']
+        generated_by_name = conn.execute(
+            '''SELECT id, original_filename, file_type, file_size, upload_date 
+               FROM files 
+               WHERE user_id = ? 
+               AND file_type IN ('macro', 'instructions', 'report')
+               AND (original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ?)
+               AND (parent_file_id IS NULL OR parent_file_id != ?)
+               ORDER BY upload_date DESC''',
+            (user['id'], f'Macro_{original_filename}%', f'Instructions_{original_filename}%', 
+             f'DeletionReport_{original_filename}%', file_id)
+        ).fetchall()
+        
+        conn.close()
+        
+        # Combine and deduplicate
+        all_generated = list(generated_with_parent) + list(generated_by_name)
+        seen_ids = set()
+        unique_files = []
+        
+        for file in all_generated:
+            if file['id'] not in seen_ids:
+                seen_ids.add(file['id'])
+                unique_files.append(dict(file))
+        
+        # Organize by type
+        macros = [f for f in unique_files if f['file_type'] == 'macro']
+        instructions = [f for f in unique_files if f['file_type'] == 'instructions']
+        reports = [f for f in unique_files if f['file_type'] == 'report']
+        
+        return jsonify({
+            'macros': macros,
+            'instructions': instructions,
+            'reports': reports
+        }), 200
+        
+    except Exception as e:
+        print(f"ERROR: get_generated_files: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 # Health check
 @app.route('/api/health', methods=['GET'])
 def health_check():
