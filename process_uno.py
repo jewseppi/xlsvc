@@ -58,7 +58,7 @@ def main():
         # Round-trip through openpyxl to normalize the format
         # This fixes minor XML inconsistencies that Numbers rejects
         from openpyxl import load_workbook
-        wb = load_workbook(output_path)
+        wb = load_workbook(output_path, data_only=True, keep_vba=False)
         wb.save(output_path)
         wb.close()
         

@@ -1675,6 +1675,7 @@ def analyze_excel_file(input_path):
     """Analyze Excel file to find rows to delete (using your existing logic)"""
     try:
         wb = load_workbook(input_path, data_only=True)
+        
         rows_to_delete_by_sheet = {}
         
         for sheet_name in wb.sheetnames:
