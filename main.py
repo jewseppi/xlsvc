@@ -404,15 +404,15 @@ def get_files():
         
         conn = get_db()
         
-        # Get ALL files for this user
+        # Get only ORIGINAL files
         files = conn.execute(
             '''SELECT f.* FROM files f
-               JOIN users u ON f.user_id = u.id
-               WHERE u.email = ?
-               ORDER BY f.upload_date DESC''',
+            JOIN users u ON f.user_id = u.id
+            WHERE u.email = ? AND (f.file_type = 'original' OR f.file_type IS NULL)
+            ORDER BY f.upload_date DESC''',
             (current_user_email,)
         ).fetchall()
-        
+    
         # Convert to list of dictionaries and check if files exist on disk
         valid_files = []
         for file in files:
@@ -1422,7 +1422,7 @@ def processing_callback():
             # Save the processed file
             file_extension = 'xlsx'
             output_filename = f"processed_{uuid.uuid4().hex[:8]}.{file_extension}"
-            output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
+            output_path = os.path.join(app.config['PROCESSED_FOLDER'], output_filename)
             
             uploaded_file.save(output_path)
             file_size = os.path.getsize(output_path)
