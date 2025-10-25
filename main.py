@@ -840,7 +840,22 @@ def download_file_with_token(file_id):
         )
         
         if not os.path.exists(file_path):
-            return jsonify({'error': 'File not found on disk'}), 404
+            print(f"DEBUG: Removing missing file from DB: {stored_filename}")
+            
+            # Get file_type from the dict
+            file_type = file_dict.get('file_type') or 'original'
+            
+            # NEW: Delete related processing jobs FIRST (before deleting file)
+            if file_type == 'processed':
+                conn.execute(
+                    'DELETE FROM processing_jobs WHERE result_file_id = ?',
+                    (file_dict['id'],)
+                )
+                print(f"DEBUG: Deleted processing job for file_id {file_dict['id']}")
+            
+            # Then delete the file record
+            conn.execute('DELETE FROM files WHERE id = ?', (file_dict['id'],))
+            removed_count += 1
         
         # Determine MIME type
         original_filename = file_info['original_filename']
