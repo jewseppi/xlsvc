@@ -445,6 +445,20 @@ def process_file(file_id):
     try:
         current_user_email = get_jwt_identity()
         
+        # NEW: Get filter rules from request body
+        data = request.get_json() or {}
+        filter_rules = data.get('filter_rules', [])
+        
+        # Validate filter rules
+        if not filter_rules or len(filter_rules) == 0:
+            return jsonify({
+                'error': 'filter_rules required and must be a non-empty array'
+            }), 400
+        
+        print(f"DEBUG: Manual processing with {len(filter_rules)} filter rules")
+        for rule in filter_rules:
+            print(f"DEBUG: Rule: Column {rule.get('column')} = '{rule.get('value')}'")
+        
         # Get file info and verify ownership
         conn = get_db()
         file_info = conn.execute(
@@ -457,10 +471,7 @@ def process_file(file_id):
         if not file_info:
             return jsonify({'error': 'File not found'}), 404
         
-        # Convert to dict to avoid sqlite3.Row issues
         file_dict = dict(file_info)
-        
-        # Get file path (keep it simple for now - just use uploads folder)
         input_path = os.path.join(app.config['UPLOAD_FOLDER'], file_dict['stored_filename'])
         
         if not os.path.exists(input_path):
@@ -472,7 +483,6 @@ def process_file(file_id):
         total_rows_to_delete = 0
         
         try:
-            # Load workbook with calculated values for analysis
             wb_calc = load_workbook(input_path, data_only=True)
             
             for sheet_name in wb_calc.sheetnames:
@@ -483,21 +493,28 @@ def process_file(file_id):
                 max_row = sheet.max_row
                 
                 for row_num in range(1, max_row + 1):
-                    # Get values from columns F, G, H, I (6, 7, 8, 9)
-                    f_val = sheet.cell(row=row_num, column=6).value
-                    g_val = sheet.cell(row=row_num, column=7).value
-                    h_val = sheet.cell(row=row_num, column=8).value
-                    i_val = sheet.cell(row=row_num, column=9).value
+                    # NEW: Check columns dynamically based on filter_rules
+                    all_match = True
                     
-                    # Check if ALL four columns are empty/zero
-                    if (is_empty_or_zero(f_val) and 
-                        is_empty_or_zero(g_val) and 
-                        is_empty_or_zero(h_val) and 
-                        is_empty_or_zero(i_val)):
+                    for rule in filter_rules:
+                        column = rule.get('column')
+                        expected_value = rule.get('value')
                         
+                        # Convert column letter/number to index
+                        col_index = column_to_index(column)
+                        
+                        # Get cell value
+                        cell_val = sheet.cell(row=row_num, column=col_index).value
+                        
+                        # Check if matches the rule
+                        if not is_empty_or_zero(cell_val) if expected_value == '0' else cell_val != expected_value:
+                            all_match = False
+                            break
+                    
+                    if all_match:
                         rows_to_delete.append(row_num)
-                        if len(rows_to_delete) <= 5:  # Only log first 5 for brevity
-                            processing_log.append(f"Row {row_num} marked for deletion: F={f_val}, G={g_val}, H={h_val}, I={i_val}")
+                        if len(rows_to_delete) <= 5:
+                            processing_log.append(f"Row {row_num} marked for deletion")
                 
                 if len(rows_to_delete) > 5:
                     processing_log.append(f"... and {len(rows_to_delete) - 5} more rows")
@@ -518,13 +535,14 @@ def process_file(file_id):
                     'processing_log': processing_log + ["Analysis complete - no changes needed"]
                 }), 200
             
-            # Generate LibreOffice Calc macro
+            # NEW: Pass filter_rules to macro generator
             macro_content = generate_libreoffice_macro(
                 file_dict['original_filename'], 
-                rows_to_delete_by_sheet
+                rows_to_delete_by_sheet,
+                filter_rules  # ← Add this parameter
             )
             
-            # Save macro file (keep in uploads folder for now)
+            # Save macro file
             macro_filename = f"macro_{uuid.uuid4().hex[:8]}.bas"
             macro_path = os.path.join(app.config['MACROS_FOLDER'], macro_filename)
             
@@ -535,7 +553,8 @@ def process_file(file_id):
             instructions = generate_instructions(
                 file_dict['original_filename'],
                 total_rows_to_delete,
-                list(rows_to_delete_by_sheet.keys())
+                list(rows_to_delete_by_sheet.keys()),
+                filter_rules  # ← Add this parameter
             )
             
             instructions_filename = f"instructions_{uuid.uuid4().hex[:8]}.txt"
@@ -559,7 +578,6 @@ def process_file(file_id):
                  instructions_filename, os.path.getsize(instructions_path), True, 'instructions')
             ).lastrowid
             
-            # Mark original file as analyzed
             conn.execute('UPDATE files SET processed = TRUE WHERE id = ?', (file_id,))
             conn.commit()
             conn.close()
@@ -593,9 +611,26 @@ def process_file(file_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-def generate_libreoffice_macro(original_filename, rows_to_delete_by_sheet):
-    """Generate a LibreOffice Calc macro that deletes rows and exits cleanly in headless CI."""
+def column_to_index(col):
+    """Convert column letter (A, F, Z) or number (1, 6, 26) to 1-based column index"""
+    col = str(col).strip().upper()
+    
+    # If it's already a number, return it as int
+    if col.isdigit():
+        return int(col)
+    
+    # Convert letter(s) to number (A=1, B=2, ... Z=26, AA=27, etc.)
+    index = 0
+    for char in col:
+        if char.isalpha():
+            index = index * 26 + (ord(char) - ord('A') + 1)
+    return index
 
+def generate_libreoffice_macro(original_filename, rows_to_delete_by_sheet, filter_rules=None):
+    """Generate a LibreOffice Calc macro that deletes rows"""
+    # The macro code stays the same - it just deletes the specific rows identified
+    # No changes needed to the macro itself
+    
     macro_header = f'''REM Macro generated to clean up: {original_filename}
 REM Generated on: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC
 Option Explicit
@@ -691,8 +726,16 @@ End Sub
 
     return macro_header + macro_body + macro_footer
 
-def generate_instructions(original_filename, total_rows, sheet_names):
+def generate_instructions(original_filename, total_rows, sheet_names, filter_rules):
     """Generate step-by-step instructions for using the macro"""
+    
+    # Build filter description
+    filter_desc = "These rows match ALL of the following conditions:\n"
+    for rule in filter_rules:
+        if rule['value'] == '0':
+            filter_desc += f"  • Column {rule['column']} is empty or zero\n"
+        else:
+            filter_desc += f"  • Column {rule['column']} equals '{rule['value']}'\n"
     
     return f"""EXCEL FILE CLEANUP INSTRUCTIONS
 Generated for: {original_filename}
@@ -702,7 +745,7 @@ Generated on: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC
 Analysis found {total_rows} rows to be deleted across {len(sheet_names)} sheet(s):
 {chr(10).join(f"• {sheet}" for sheet in sheet_names)}
 
-These rows have empty or zero values in columns F, G, H, and I.
+{filter_desc}
 
 === METHOD 1: LIBREOFFICE CALC MACRO (RECOMMENDED) ===
 
@@ -753,6 +796,7 @@ If you need help or encounter issues:
 
 Generated by Excel Processor Tool
 """
+
 
 @app.route('/api/download-with-token/<int:file_id>', methods=['GET'])
 def download_file_with_token(file_id):
