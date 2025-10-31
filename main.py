@@ -588,9 +588,9 @@ def process_file(file_id):
             report_file_id = None
             if generate_deletion_report(deleted_rows_data, report_path):
                 report_file_id = conn.execute(
-                    '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type) 
+                    '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id) 
                        VALUES (?, ?, ?, ?, ?, ?)''',
-                    (file_dict['user_id'], f"DeletionReport_{file_dict['original_filename']}", 
+                    (file_dict['user_id'], f"DeletionReport_Manual_{file_dict['original_filename']}", 
                      report_filename, os.path.getsize(report_path), True, 'report')
                 ).lastrowid
                 processing_log.append("Deletion report generated")
@@ -980,7 +980,7 @@ def cleanup_files():
                 file_path = os.path.join(app.config['PROCESSED_FOLDER'], stored_filename)
             elif file_type in ['macro', 'instructions']:
                 file_path = os.path.join(app.config['MACROS_FOLDER'], stored_filename)
-            elif file_type == 'report':  # ← ADD THIS
+            elif file_type == 'report':
                 file_path = os.path.join(app.config['REPORTS_FOLDER'], stored_filename)
             else:
                 file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
@@ -1582,7 +1582,7 @@ def processing_callback():
             report_file_id = conn.execute(
                 '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id) 
                    VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                (job['user_id'], f"DeletionReport_{original_filename}", report_filename, report_size, True, 'report', job['original_file_id'])
+                (job['user_id'], f"DeletionReport_Automated_{original_filename}", report_filename, report_size, True, 'report', job['original_file_id'])
             ).lastrowid
         
         # Update job status with report_file_id
