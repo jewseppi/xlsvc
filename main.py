@@ -589,7 +589,7 @@ def process_file(file_id):
             if generate_deletion_report(deleted_rows_data, report_path):
                 report_file_id = conn.execute(
                     '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id) 
-                       VALUES (?, ?, ?, ?, ?, ?)''',
+                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
                     (file_dict['user_id'], f"DeletionReport_Manual_{file_dict['original_filename']}", 
                      report_filename, os.path.getsize(report_path), True, 'report', file_id)
                 ).lastrowid
