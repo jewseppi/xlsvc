@@ -590,7 +590,7 @@ def process_file(file_id):
                 report_file_id = conn.execute(
                     '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type) 
                        VALUES (?, ?, ?, ?, ?, ?)''',
-                    (file_dict['user_id'], f"DeletionReport_Manual_{file_dict['original_filename']}", 
+                    (file_dict['user_id'], f"DeletionReport{file_dict['original_filename']}", 
                      report_filename, os.path.getsize(report_path), True, 'report')
                 ).lastrowid
                 processing_log.append("Deletion report generated")
@@ -1582,7 +1582,7 @@ def processing_callback():
             report_file_id = conn.execute(
                 '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id) 
                    VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                (job['user_id'], f"DeletionReport_Automated_{original_filename}", report_filename, report_size, True, 'report', job['original_file_id'])
+                (job['user_id'], f"DeletionReport_{original_filename}", report_filename, report_size, True, 'report', job['original_file_id'])
             ).lastrowid
         
         # Update job status with report_file_id
