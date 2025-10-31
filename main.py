@@ -591,7 +591,7 @@ def process_file(file_id):
                     '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id) 
                        VALUES (?, ?, ?, ?, ?, ?)''',
                     (file_dict['user_id'], f"DeletionReport_Manual_{file_dict['original_filename']}", 
-                     report_filename, os.path.getsize(report_path), True, 'report')
+                     report_filename, os.path.getsize(report_path), True, 'report', file_id)
                 ).lastrowid
                 processing_log.append("Deletion report generated")
             
