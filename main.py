@@ -15,6 +15,26 @@ import secrets
 import jwt as jwt_lib
 import time
 import json
+from collections import defaultdict
+from functools import wraps
+
+# Rate limiting storage
+request_counts = defaultdict(list)
+
+def rate_limit(max_requests=10, window_seconds=60):
+    """Rate limiting decorator"""
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+            now = time.time()
+            request_counts[client_ip] = [t for t in request_counts[client_ip] if now - t < window_seconds]
+            if len(request_counts[client_ip]) >= max_requests:
+                return jsonify({'error': 'Rate limit exceeded'}), 429
+            request_counts[client_ip].append(now)
+            return f(*args, **kwargs)
+        return wrapper
+    return decorator
 
 app = Flask(__name__)
 
@@ -30,6 +50,15 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 # Initialize extensions
 CORS(app, origins=['http://localhost:5173', 'https://xlsvc.jsilverman.ca'])
 jwt = JWTManager(app)
+
+# Security headers middleware
+@app.after_request
+def add_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    return response
 
 def calculate_file_hash(file_path):
     """Calculate SHA256 hash of a file"""
@@ -217,6 +246,18 @@ def get_db():
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'xls', 'xlsx'}
 
+def validate_excel_file(file):
+    """Validate Excel file using magic bytes"""
+    file.seek(0)
+    header = file.read(8)
+    file.seek(0)
+
+    # Excel files: PK (xlsx/zip format) or OLE header (xls format)
+    if not (header.startswith(b'PK') or header.startswith(b'\xd0\xcf\x11\xe0')):
+        raise ValueError("Invalid Excel file - file signature does not match Excel format")
+
+    return True
+
 def evaluate_cell_value(cell):
     """
     Get the actual value of a cell, evaluating formulas if necessary.
@@ -303,6 +344,7 @@ def register():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/login', methods=['POST'])
+@rate_limit(max_requests=5, window_seconds=300)  # 5 attempts per 5 minutes
 def login():
     try:
         data = request.get_json()
@@ -358,7 +400,13 @@ def upload_file():
         
         if not allowed_file(file.filename):
             return jsonify({'error': 'Only .xls and .xlsx files allowed'}), 400
-        
+
+        # Validate file content using magic bytes
+        try:
+            validate_excel_file(file)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
         # Generate unique filename for storage
         original_filename = secure_filename(file.filename)
         file_extension = original_filename.rsplit('.', 1)[1].lower()
