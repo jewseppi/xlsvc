@@ -104,7 +104,7 @@ def maybe_cleanup_old_files():
         return
 
     try:
-        cutoff = datetime.utcnow() - timedelta(days=60)
+        cutoff = datetime.utcnow() - timedelta(days=30)
         conn = get_db()
 
         old_files = conn.execute(
