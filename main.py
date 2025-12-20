@@ -1969,10 +1969,6 @@ def get_generated_files(file_id):
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-# Landing page
-@app.route('/', methods=['GET'])
-def landing_page():
-
 # App route - redirect to React app (in production this would serve built files)
 @app.route('/app', methods=['GET'])
 def app_page():
@@ -2006,19 +2002,19 @@ def landing_page():
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Excel Batch Cleaner - Clean Multi-Sheet Workbooks in One Click</title>
+  <title>xlsvc - Clean Multi-Sheet Excel Workbooks in One Click</title>
   <meta name="description" content="Delete rows across multiple Excel sheets with custom filter conditions. Preserves images and formatting. Open source and free to use.">
   <meta name="keywords" content="excel cleaner, batch excel processing, delete excel rows, multi-sheet excel, excel image preservation">
 
   <!-- Open Graph -->
-  <meta property="og:title" content="Excel Batch Cleaner">
+  <meta property="og:title" content="xlsvc - Excel Batch Processor">
   <meta property="og:description" content="Clean massive Excel workbooks in one click. Custom filters, all sheets, images preserved.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://xlsvc.jsilverman.ca">
 
   <!-- Twitter -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Excel Batch Cleaner">
+  <meta name="twitter:title" content="xlsvc - Excel Batch Processor">
   <meta name="twitter:description" content="Clean massive Excel workbooks in one click. Custom filters, all sheets, images preserved.">
 
   <style>
@@ -2032,7 +2028,7 @@ def landing_page():
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
       line-height: 1.6;
       color: #1a1a2e;
-      background: #f8f9fa;
+      background: #f5f3f0;
     }
 
     .container {
@@ -2136,13 +2132,14 @@ def landing_page():
     /* Problem Section */
     .problem {
       padding: 4rem 0;
-      background: #fff;
+      background: #f5f3f0;
     }
 
     .problem h2 {
       text-align: center;
       font-size: 2rem;
       margin-bottom: 3rem;
+      color: #1a1a2e;
     }
 
     .problem-grid {
@@ -2159,24 +2156,25 @@ def landing_page():
     }
 
     .problem-text p {
-      color: #666;
-      margin-bottom: 1rem;
+      color: #444;
+      line-height: 1.8;
     }
 
     .solution-text h3 {
-      color: #16a34a;
+      color: #6366f1;
       font-size: 1.3rem;
       margin-bottom: 1rem;
     }
 
     .solution-text p {
-      color: #666;
+      color: #444;
+      line-height: 1.8;
     }
 
     /* Features */
     .features {
       padding: 4rem 0;
-      background: #f8f9fa;
+      background: #e8e6e3;
     }
 
     .features h2 {
@@ -2192,7 +2190,7 @@ def landing_page():
     }
 
     .feature-card {
-      background: #fff;
+      background: #faf9f7;
       padding: 2rem;
       border-radius: 12px;
       box-shadow: 0 2px 8px rgba(0,0,0,0.08);
@@ -2216,7 +2214,7 @@ def landing_page():
     /* How it Works */
     .how-it-works {
       padding: 4rem 0;
-      background: #fff;
+      background: #f5f3f0;
     }
 
     .how-it-works h2 {
@@ -2319,7 +2317,7 @@ def landing_page():
 
   <header>
     <div class="container">
-      <a href="/" class="logo">Excel<span>Cleaner</span></a>
+      <a href="/" class="logo">xl<span>svc</span></a>
       <nav>
         <a href="#features">Features</a>
         <a href="https://github.com/jewseppi/xlsvc" target="_blank">GitHub</a>
@@ -2345,15 +2343,11 @@ def landing_page():
       <div class="problem-grid">
         <div class="problem-text">
           <h3>😤 The Manual Way</h3>
-          <p>You have a 30-sheet workbook. You need to delete all rows where certain columns are empty.</p>
-          <p>Excel's filter only works one sheet at a time. You spend an hour clicking through each sheet, filtering, deleting, repeating.</p>
-          <p>Worse: if your sheets have images, most tools destroy them.</p>
+          <p>Got a workbook with 30 sheets? Need to delete rows based on a condition? Excel makes you do it one sheet at a time. Click, filter, delete, repeat. Thirty times. And when you finally try a cleanup tool to speed things up, it strips out all your images.</p>
         </div>
         <div class="solution-text">
-          <h3>✨ With Excel Cleaner</h3>
-          <p>Upload your workbook. Set your filter rules once. Click process.</p>
-          <p>Every sheet is cleaned in seconds. Your images, charts, and formatting stay exactly where they were.</p>
-          <p>Download your cleaned workbook. Done.</p>
+          <h3>✨ The xlsvc Way</h3>
+          <p>Upload your file. Pick your columns. Set your condition. Hit process. Every sheet is cleaned at once, images and formatting intact. You get the cleaned file plus a report showing exactly which rows were removed and why.</p>
         </div>
       </div>
     </div>
