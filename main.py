@@ -580,21 +580,7 @@ def process_file(file_id):
             instructions_path = os.path.join(app.config['MACROS_FOLDER'], instructions_filename)
             with open(instructions_path, 'w', encoding='utf-8') as f:
                 f.write(instructions)
-            
-            # ← NEW: Generate deletion report
-            report_filename = f"deletion_report_{uuid.uuid4().hex[:8]}.xlsx"
-            report_path = os.path.join(app.config['REPORTS_FOLDER'], report_filename)
-            
-            report_file_id = None
-            if generate_deletion_report(deleted_rows_data, report_path):
-                report_file_id = conn.execute(
-                    '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id) 
-                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                    (file_dict['user_id'], f"DeletionReport_Manual_{file_dict['original_filename']}", 
-                     report_filename, os.path.getsize(report_path), True, 'report', file_id)
-                ).lastrowid
-                processing_log.append("Deletion report generated")
-            
+
             # Record macro and instructions in database
             macro_file_id = conn.execute(
                 '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type) 
@@ -629,11 +615,7 @@ def process_file(file_id):
                     'instructions': {
                         'file_id': instructions_file_id,
                         'filename': f"Instructions_{file_dict['original_filename']}.txt"
-                    },
-                    'report': {
-                        'file_id': report_file_id,
-                        'filename': f"DeletionReport_{file_dict['original_filename']}"
-                    } if report_file_id else None
+                    }
                 }
             }), 200
             
