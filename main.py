@@ -1969,6 +1969,479 @@ def get_generated_files(file_id):
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+# Landing page
+@app.route('/', methods=['GET'])
+def landing_page():
+
+# App route - redirect to React app (in production this would serve built files)
+@app.route('/app', methods=['GET'])
+def app_page():
+    # In development, redirect to Vite dev server (typically port 5173)
+    # In production, this would serve the built React app files
+    return '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Excel Batch Cleaner - App</title>
+    <script>
+        // In development, redirect to Vite dev server
+        // In production, this would be replaced with the built React app
+        window.location.href = 'http://localhost:5173';
+    </script>
+</head>
+<body>
+    <p>Redirecting to Excel Cleaner app...</p>
+    <p>If you're seeing this, make sure the React development server is running on port 5173.</p>
+</body>
+</html>
+''', 200, {'Content-Type': 'text/html'}
+
+# Landing page
+@app.route('/', methods=['GET'])
+def landing_page():
+    return '''<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Excel Batch Cleaner - Clean Multi-Sheet Workbooks in One Click</title>
+  <meta name="description" content="Delete rows across multiple Excel sheets with custom filter conditions. Preserves images and formatting. Open source and free to use.">
+  <meta name="keywords" content="excel cleaner, batch excel processing, delete excel rows, multi-sheet excel, excel image preservation">
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="Excel Batch Cleaner">
+  <meta property="og:description" content="Clean massive Excel workbooks in one click. Custom filters, all sheets, images preserved.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://xlsvc.jsilverman.ca">
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Excel Batch Cleaner">
+  <meta name="twitter:description" content="Clean massive Excel workbooks in one click. Custom filters, all sheets, images preserved.">
+
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      line-height: 1.6;
+      color: #1a1a2e;
+      background: #f8f9fa;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 20px;
+    }
+
+    /* Header */
+    header {
+      background: #1a1a2e;
+      padding: 1rem 0;
+    }
+
+    header .container {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .logo {
+      color: #fff;
+      font-size: 1.5rem;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .logo span {
+      color: #6366f1;
+    }
+
+    nav a {
+      color: #fff;
+      text-decoration: none;
+      margin-left: 2rem;
+      opacity: 0.9;
+    }
+
+    nav a:hover {
+      opacity: 1;
+    }
+
+    /* Hero */
+    .hero {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #fff;
+      padding: 5rem 0;
+      text-align: center;
+    }
+
+    .hero h1 {
+      font-size: 3rem;
+      margin-bottom: 1.5rem;
+      line-height: 1.2;
+    }
+
+    .hero h1 span {
+      color: #6366f1;
+    }
+
+    .hero p {
+      font-size: 1.25rem;
+      opacity: 0.9;
+      max-width: 600px;
+      margin: 0 auto 2rem;
+    }
+
+    .cta-buttons {
+      display: flex;
+      gap: 1rem;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-block;
+      padding: 1rem 2rem;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 1.1rem;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+
+    .btn-primary {
+      background: #6366f1;
+      color: #fff;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: #fff;
+      border: 2px solid rgba(255,255,255,0.3);
+    }
+
+    /* Problem Section */
+    .problem {
+      padding: 4rem 0;
+      background: #fff;
+    }
+
+    .problem h2 {
+      text-align: center;
+      font-size: 2rem;
+      margin-bottom: 3rem;
+    }
+
+    .problem-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 3rem;
+      align-items: center;
+    }
+
+    .problem-text h3 {
+      color: #dc2626;
+      font-size: 1.3rem;
+      margin-bottom: 1rem;
+    }
+
+    .problem-text p {
+      color: #666;
+      margin-bottom: 1rem;
+    }
+
+    .solution-text h3 {
+      color: #16a34a;
+      font-size: 1.3rem;
+      margin-bottom: 1rem;
+    }
+
+    .solution-text p {
+      color: #666;
+    }
+
+    /* Features */
+    .features {
+      padding: 4rem 0;
+      background: #f8f9fa;
+    }
+
+    .features h2 {
+      text-align: center;
+      font-size: 2rem;
+      margin-bottom: 3rem;
+    }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 2rem;
+    }
+
+    .feature-card {
+      background: #fff;
+      padding: 2rem;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+
+    .feature-icon {
+      font-size: 2.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .feature-card h3 {
+      margin-bottom: 0.5rem;
+      font-size: 1.2rem;
+    }
+
+    .feature-card p {
+      color: #666;
+      font-size: 0.95rem;
+    }
+
+    /* How it Works */
+    .how-it-works {
+      padding: 4rem 0;
+      background: #fff;
+    }
+
+    .how-it-works h2 {
+      text-align: center;
+      font-size: 2rem;
+      margin-bottom: 3rem;
+    }
+
+    .steps {
+      display: flex;
+      justify-content: space-between;
+      gap: 2rem;
+      flex-wrap: wrap;
+    }
+
+    .step {
+      flex: 1;
+      min-width: 200px;
+      text-align: center;
+    }
+
+    .step-number {
+      width: 50px;
+      height: 50px;
+      background: #6366f1;
+      color: #fff;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin: 0 auto 1rem;
+    }
+
+    .step h3 {
+      margin-bottom: 0.5rem;
+    }
+
+    .step p {
+      color: #666;
+      font-size: 0.95rem;
+    }
+
+    /* Open Source */
+    .open-source {
+      padding: 4rem 0;
+      background: #1a1a2e;
+      color: #fff;
+      text-align: center;
+    }
+
+    .open-source h2 {
+      font-size: 2rem;
+      margin-bottom: 1rem;
+    }
+
+    .open-source p {
+      opacity: 0.9;
+      max-width: 600px;
+      margin: 0 auto 2rem;
+    }
+
+    /* Footer */
+    footer {
+      padding: 2rem 0;
+      background: #0f0f1a;
+      color: #fff;
+      text-align: center;
+    }
+
+    footer p {
+      opacity: 0.7;
+      font-size: 0.9rem;
+    }
+
+    footer a {
+      color: #6366f1;
+      text-decoration: none;
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .hero h1 {
+        font-size: 2rem;
+      }
+
+      .problem-grid {
+        grid-template-columns: 1fr;
+      }
+
+      nav a {
+        margin-left: 1rem;
+        font-size: 0.9rem;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="container">
+      <a href="/" class="logo">Excel<span>Cleaner</span></a>
+      <nav>
+        <a href="#features">Features</a>
+        <a href="https://github.com/jewseppi/xlsvc" target="_blank">GitHub</a>
+        <a href="/app">Launch App</a>
+      </nav>
+    </div>
+  </header>
+
+  <section class="hero">
+    <div class="container">
+      <h1>Clean Massive Excel Workbooks<br><span>In One Click</span></h1>
+      <p>Delete rows across multiple Excel sheets with custom filter conditions. Preserves your images and formatting. Open source and free.</p>
+      <div class="cta-buttons">
+        <a href="/app" class="btn btn-primary">Try It Free</a>
+        <a href="https://github.com/jewseppi/xlsvc" class="btn btn-secondary" target="_blank">View Source</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="problem">
+    <div class="container">
+      <h2>The Problem We Solve</h2>
+      <div class="problem-grid">
+        <div class="problem-text">
+          <h3>😤 The Manual Way</h3>
+          <p>You have a 30-sheet workbook. You need to delete all rows where certain columns are empty.</p>
+          <p>Excel's filter only works one sheet at a time. You spend an hour clicking through each sheet, filtering, deleting, repeating.</p>
+          <p>Worse: if your sheets have images, most tools destroy them.</p>
+        </div>
+        <div class="solution-text">
+          <h3>✨ With Excel Cleaner</h3>
+          <p>Upload your workbook. Set your filter rules once. Click process.</p>
+          <p>Every sheet is cleaned in seconds. Your images, charts, and formatting stay exactly where they were.</p>
+          <p>Download your cleaned workbook. Done.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="features" id="features">
+    <div class="container">
+      <h2>Features</h2>
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">📊</div>
+          <h3>Multi-Sheet Processing</h3>
+          <p>Apply your filter rules to every sheet in the workbook at once. No more clicking through tabs one by one.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🎯</div>
+          <h3>Custom Filter Conditions</h3>
+          <p>Set rules on any column. Delete rows where cells are empty, zero, or match specific values. Your rules, your data.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🖼️</div>
+          <h3>Image Preservation</h3>
+          <p>Unlike most tools, we preserve your embedded images, charts, and formatting. What you put in is what you get out.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">⚡</div>
+          <h3>Fast Processing</h3>
+          <p>Powered by LibreOffice under the hood. Handles large workbooks with thousands of rows efficiently.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">📋</div>
+          <h3>Deletion Reports</h3>
+          <p>Get a detailed report of exactly which rows were deleted and why. Full audit trail for your records.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🔓</div>
+          <h3>Open Source</h3>
+          <p>Fully open source. Self-host it for free, or use our hosted version. Inspect the code, trust the process.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="how-it-works">
+    <div class="container">
+      <h2>How It Works</h2>
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">1</div>
+          <h3>Upload</h3>
+          <p>Drop your Excel file (.xlsx or .xls)</p>
+        </div>
+        <div class="step">
+          <div class="step-number">2</div>
+          <h3>Configure</h3>
+          <p>Set which columns and conditions to filter on</p>
+        </div>
+        <div class="step">
+          <div class="step-number">3</div>
+          <h3>Process</h3>
+          <p>We clean all sheets and preserve your images</p>
+        </div>
+        <div class="step">
+          <div class="step-number">4</div>
+          <h3>Download</h3>
+          <p>Get your cleaned workbook and deletion report</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="open-source">
+    <div class="container">
+      <h2>100% Open Source</h2>
+      <p>Don't trust us with your data? Run it yourself. The entire codebase is available on GitHub. Self-host for free, or let us handle the infrastructure.</p>
+      <a href="https://github.com/jewseppi/xlsvc" class="btn btn-primary" target="_blank">View on GitHub</a>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <p>Built by <a href="https://jsilverman.ca" target="_blank">jsilverman</a> · <a href="https://github.com/jewseppi/xlsvc" target="_blank">GitHub</a></p>
+    </div>
+  </footer>
+
+</body>
+</html>''', 200, {'Content-Type': 'text/html'}
+
 # Health check
 @app.route('/api/health', methods=['GET'])
 def health_check():
