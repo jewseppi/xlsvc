@@ -93,5 +93,5 @@ jobs:
           path: |
             output.xlsx
             process_output.log
-          retention-days: 7
+          retention-days: 30
           if-no-files-found: warn
