@@ -483,10 +483,40 @@ def process_file(file_id):
         
         file_dict = dict(file_info)
         input_path = os.path.join(app.config['UPLOAD_FOLDER'], file_dict['stored_filename'])
-        
+
         if not os.path.exists(input_path):
             return jsonify({'error': 'File not found on disk'}), 404
-        
+
+        # Check if this file has already been processed with the same filter rules
+        existing_jobs = conn.execute(
+            '''SELECT pj.filter_rules_json, pj.status
+               FROM processing_jobs pj
+               WHERE pj.original_file_id = ? AND pj.user_id = ? AND pj.status = 'completed'
+               ORDER BY pj.created_at DESC''',
+            (file_id, file_dict['user_id'])
+        ).fetchall()
+
+        # Check if any completed job has matching filter rules
+        for job in existing_jobs:
+            if job['filter_rules_json']:
+                try:
+                    job_filters = json.loads(job['filter_rules_json'])
+                    # Check if filter rules match
+                    if (len(job_filters) == len(filter_rules) and
+                        all(any(job_rule['column'] == current_rule['column'] and
+                               job_rule['value'] == current_rule['value']
+                               for job_rule in job_filters)
+                            for current_rule in filter_rules)):
+                        conn.close()
+                        return jsonify({
+                            'message': 'File already processed with these filter rules',
+                            'already_processed': True,
+                            'processing_log': ['Analysis skipped - file already processed with identical filter rules']
+                        }), 200
+                except (json.JSONDecodeError, KeyError):
+                    # Skip malformed filter rules
+                    continue
+
         # Analyze the Excel file
         processing_log = []
         rows_to_delete_by_sheet = {}
