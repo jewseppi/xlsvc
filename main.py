@@ -15,6 +15,7 @@ import secrets
 import jwt as jwt_lib
 import time
 import json
+import random
 from collections import defaultdict
 from functools import wraps
 
@@ -92,7 +93,50 @@ def get_file_path(file_type, filename):
         return os.path.join(app.config['REPORTS_FOLDER'], filename)
     else:
         return os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    
+
+def maybe_cleanup_old_files():
+    """
+    Lazy cleanup - runs with 5% probability on authenticated requests.
+    Deletes generated files (processed, macros, instructions, reports) older than 30 days.
+    Original uploads are preserved.
+    """
+    if random.random() > 0.05:
+        return
+
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=30)
+        conn = get_db()
+
+        old_files = conn.execute(
+            '''SELECT id, stored_filename, file_type FROM files
+               WHERE upload_date < ?
+               AND file_type IN ('processed', 'macro', 'instructions', 'report')''',
+            (cutoff.isoformat(),)
+        ).fetchall()
+
+        deleted_count = 0
+        for f in old_files:
+            f_dict = dict(f)
+            file_path = get_file_path(f_dict['file_type'], f_dict['stored_filename'])
+
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+            if f_dict['file_type'] == 'processed':
+                conn.execute('DELETE FROM processing_jobs WHERE result_file_id = ?', (f_dict['id'],))
+
+            conn.execute('DELETE FROM files WHERE id = ?', (f_dict['id'],))
+            deleted_count += 1
+
+        if deleted_count > 0:
+            conn.commit()
+            print(f"AUTO-CLEANUP: Deleted {deleted_count} files older than 30 days")
+
+        conn.close()
+
+    except Exception as e:
+        print(f"AUTO-CLEANUP ERROR: {str(e)}")
+
 def generate_download_token(file_id, user_id, expires_in_minutes=30):
     """Generate a temporary download token for GitHub Actions"""
     payload = {
@@ -489,7 +533,9 @@ def get_files():
                 print(f"DEBUG: File not found on disk: {file_path}")
         
         conn.close()
-        
+
+        maybe_cleanup_old_files()  # Lazy cleanup of old generated files
+
         return jsonify({
             'files': valid_files
         }), 200
