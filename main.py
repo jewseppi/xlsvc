@@ -1,6 +1,6 @@
 from deletion_report import generate_deletion_report, capture_row_data
 from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
@@ -16,6 +16,7 @@ import jwt as jwt_lib
 import time
 import json
 import random
+import re
 from collections import defaultdict
 from functools import wraps
 
@@ -93,7 +94,7 @@ def get_file_path(file_type, filename):
         return os.path.join(app.config['REPORTS_FOLDER'], filename)
     else:
         return os.path.join(app.config['UPLOAD_FOLDER'], filename)
-
+    
 def maybe_cleanup_old_files():
     """
     Lazy cleanup - runs with 5% probability on authenticated requests.
@@ -272,6 +273,16 @@ def init_db():
             raise
         print("⚠️  report_file_id column already exists")
 
+    # Subscribers table for email signups
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS subscribers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            created_at TEXT NOT NULL,
+            notified_at TEXT DEFAULT NULL
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
@@ -344,6 +355,46 @@ def is_empty_or_zero(val):
     # Check for formulas that might evaluate to 0
     # This would require formula evaluation which openpyxl doesn't do by default
     return False
+
+
+# Newsletter subscription endpoints
+@app.route('/api/subscribe', methods=['POST'])
+@cross_origin(origins=['https://xlsvc.jsilverman.ca', 'http://localhost:5173'])
+def subscribe():
+    """Subscribe an email address to notifications/newsletter."""
+    try:
+        data = request.get_json() or {}
+        email = str(data.get('email', '')).strip().lower()
+
+        # Basic email validation
+        if not email or not re.match(r'^[^@]+@[^@]+\.[^@]+$', email):
+            return jsonify({'error': 'Invalid email'}), 400
+
+        conn = get_db()
+
+        # Check if already subscribed
+        existing = conn.execute(
+            'SELECT id FROM subscribers WHERE email = ?',
+            (email,)
+        ).fetchone()
+
+        if existing:
+            conn.close()
+            return jsonify({'error': 'Already subscribed'}), 409
+
+        # Insert new subscriber
+        conn.execute(
+            'INSERT INTO subscribers (email, created_at) VALUES (?, ?)',
+            (email, datetime.utcnow().isoformat())
+        )
+        conn.commit()
+        conn.close()
+
+        return jsonify({'success': True, 'message': 'Subscribed successfully'}), 200
+
+    except Exception as e:
+        print(f"Subscribe error: {e}")
+        return jsonify({'error': 'Server error'}), 500
 
 # Authentication endpoints
 @app.route('/api/register', methods=['POST'])
@@ -444,7 +495,7 @@ def upload_file():
         
         if not allowed_file(file.filename):
             return jsonify({'error': 'Only .xls and .xlsx files allowed'}), 400
-
+        
         # Validate file content using magic bytes
         try:
             validate_excel_file(file)
@@ -535,7 +586,7 @@ def get_files():
         conn.close()
 
         maybe_cleanup_old_files()  # Lazy cleanup of old generated files
-
+        
         return jsonify({
             'files': valid_files
         }), 200
@@ -577,10 +628,10 @@ def process_file(file_id):
         
         file_dict = dict(file_info)
         input_path = os.path.join(app.config['UPLOAD_FOLDER'], file_dict['stored_filename'])
-
+        
         if not os.path.exists(input_path):
             return jsonify({'error': 'File not found on disk'}), 404
-
+        
         # Analyze the Excel file
         processing_log = []
         rows_to_delete_by_sheet = {}
@@ -674,7 +725,7 @@ def process_file(file_id):
             instructions_path = os.path.join(app.config['MACROS_FOLDER'], instructions_filename)
             with open(instructions_path, 'w', encoding='utf-8') as f:
                 f.write(instructions)
-
+            
             # Record macro and instructions in database
             macro_file_id = conn.execute(
                 '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type) 
