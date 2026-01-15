@@ -2308,7 +2308,7 @@ def create_invitation():
         print(f"Error creating invitation: {e}")
         import traceback
         traceback.print_exc()
-            return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e)}), 500
 
 # Admin endpoint to list all invitations
 @app.route('/api/admin/invitations', methods=['GET'])
