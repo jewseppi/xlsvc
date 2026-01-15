@@ -54,11 +54,11 @@ app.config['REPORTS_FOLDER'] = 'reports'
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 
 # Initialize extensions
+# CORS: Flask-CORS automatically handles OPTIONS preflight and common methods
+# Authorization header needs to be explicitly allowed for JWT tokens
 CORS(app, 
      origins=['http://localhost:5173', 'https://xlsvc.jsilverman.ca'],
-     supports_credentials=True,
-     allow_headers=['Content-Type', 'Authorization'],
-     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
+     allow_headers=['Authorization'])  # Required for JWT Authorization header
 jwt = JWTManager(app)
 
 # Security headers middleware
