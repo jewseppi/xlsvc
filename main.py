@@ -283,6 +283,35 @@ def init_db():
         )
     ''')
 
+    # Add is_admin column to users table
+    try:
+        cursor.execute('ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0')
+        print("✅ Added is_admin column to users table")
+        
+        # Mark first user (lowest ID) as admin
+        first_user = cursor.execute('SELECT id FROM users ORDER BY id ASC LIMIT 1').fetchone()
+        if first_user:
+            cursor.execute('UPDATE users SET is_admin = 1 WHERE id = ?', (first_user[0],))
+            print(f"✅ Marked first user (ID: {first_user[0]}) as admin")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise
+        print("⚠️  is_admin column already exists")
+
+    # Invitation tokens table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS invitation_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            used_at TIMESTAMP DEFAULT NULL,
+            created_by TEXT
+        )
+    ''')
+    print("✅ Created invitation_tokens table")
+
     conn.commit()
     conn.close()
 
@@ -356,6 +385,102 @@ def is_empty_or_zero(val):
     # This would require formula evaluation which openpyxl doesn't do by default
     return False
 
+def validate_password_strength(password):
+    """
+    Validate password meets strong requirements:
+    - Minimum 12 characters
+    - At least one uppercase letter
+    - At least one lowercase letter
+    - At least one number
+    - At least one special character
+    """
+    if len(password) < 12:
+        return False, 'Password must be at least 12 characters long'
+    
+    if not re.search(r'[A-Z]', password):
+        return False, 'Password must contain at least one uppercase letter'
+    
+    if not re.search(r'[a-z]', password):
+        return False, 'Password must contain at least one lowercase letter'
+    
+    if not re.search(r'[0-9]', password):
+        return False, 'Password must contain at least one number'
+    
+    if not re.search(r'[!@#$%^&*()_+\-=\[\]{};\':"\\|,.<>\/?]', password):
+        return False, 'Password must contain at least one special character (!@#$%^&* etc.)'
+    
+    return True, None
+
+def is_admin_user(email):
+    """Check if user is admin"""
+    conn = get_db()
+    try:
+        user = conn.execute(
+            'SELECT is_admin FROM users WHERE email = ?', (email,)
+        ).fetchone()
+        if user:
+            # SQLite stores booleans as 0/1, so check for truthy value
+            return bool(user['is_admin']) if user['is_admin'] is not None else False
+        return False
+    finally:
+        conn.close()
+
+def validate_invitation_token(token):
+    """
+    Validate invitation token:
+    - Check JWT signature
+    - Check expiration
+    - Check if token has been used
+    Returns (is_valid, email, error_message)
+    """
+    try:
+        secret = app.config['JWT_SECRET_KEY']
+        payload = jwt_lib.decode(token, secret, algorithms=['HS256'])
+        
+        if payload.get('purpose') != 'invitation':
+            return False, None, 'Invalid token purpose'
+        
+        email = payload.get('email')
+        if not email:
+            return False, None, 'Invalid token: missing email'
+        
+        # Check database for token
+        conn = get_db()
+        try:
+            token_record = conn.execute(
+                '''SELECT email, expires_at, used_at FROM invitation_tokens 
+                   WHERE token = ?''',
+                (token,)
+            ).fetchone()
+            
+            if not token_record:
+                return False, None, 'Invalid or expired invitation token'
+            
+            # Check if already used
+            if token_record['used_at']:
+                return False, None, 'This invitation has already been used'
+            
+            # Check expiration
+            expires_at = datetime.fromisoformat(token_record['expires_at'])
+            if datetime.utcnow() > expires_at:
+                return False, None, 'This invitation has expired'
+            
+            # Verify email matches
+            if token_record['email'] != email:
+                return False, None, 'Token email mismatch'
+            
+            return True, email, None
+            
+        finally:
+            conn.close()
+            
+    except jwt_lib.ExpiredSignatureError:
+        return False, None, 'Invitation token has expired'
+    except jwt_lib.InvalidTokenError as e:
+        return False, None, f'Invalid invitation token: {str(e)}'
+    except Exception as e:
+        return False, None, f'Error validating token: {str(e)}'
+
 
 # Newsletter subscription endpoints
 @app.route('/api/subscribe', methods=['POST'])
@@ -398,28 +523,45 @@ def subscribe():
 
 # Authentication endpoints
 @app.route('/api/register', methods=['POST'])
+@rate_limit(max_requests=5, window_seconds=300)  # 5 attempts per 5 minutes
 def register():
-    return jsonify({'error': 'Registration is currently disabled'}), 403
-
     try:
         data = request.get_json()
-        email = data.get('email')
+        invitation_token = data.get('invitation_token')
         password = data.get('password')
         
-        if not email or not password:
-            return jsonify({'error': 'Email and password required'}), 400
+        if not invitation_token or not password:
+            return jsonify({
+                'error': 'Invitation token and password are required. Registration is by invitation only.'
+            }), 400
         
-        if len(password) < 6:
-            return jsonify({'error': 'Password must be at least 6 characters'}), 400
+        # Validate invitation token
+        is_valid, email, error_msg = validate_invitation_token(invitation_token)
+        if not is_valid:
+            return jsonify({'error': error_msg or 'Invalid invitation token'}), 400
         
+        # Validate password strength
+        is_strong, password_error = validate_password_strength(password)
+        if not is_strong:
+            return jsonify({'error': password_error}), 400
+        
+        # Hash password
         password_hash = generate_password_hash(password)
         
         conn = get_db()
         try:
+            # Create user account
             conn.execute(
-                'INSERT INTO users (email, password_hash) VALUES (?, ?)',
+                'INSERT INTO users (email, password_hash, is_admin) VALUES (?, ?, 0)',
                 (email, password_hash)
             )
+            
+            # Mark invitation token as used
+            conn.execute(
+                'UPDATE invitation_tokens SET used_at = ? WHERE token = ?',
+                (datetime.utcnow().isoformat(), invitation_token)
+            )
+            
             conn.commit()
             
             # Create access token
@@ -427,7 +569,8 @@ def register():
             
             return jsonify({
                 'message': 'User registered successfully',
-                'access_token': access_token
+                'access_token': access_token,
+                'email': email
             }), 201
             
         except sqlite3.IntegrityError:
@@ -436,6 +579,9 @@ def register():
             conn.close()
             
     except Exception as e:
+        print(f"Registration error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/login', methods=['POST'])
@@ -2032,7 +2178,129 @@ def health_check():
 @jwt_required()
 def get_profile():
     current_user_email = get_jwt_identity()
-    return jsonify({'email': current_user_email})
+    conn = get_db()
+    try:
+        user = conn.execute(
+            'SELECT email, is_admin FROM users WHERE email = ?', (current_user_email,)
+        ).fetchone()
+        if user:
+            return jsonify({
+                'email': user['email'],
+                'is_admin': bool(user['is_admin']) if user['is_admin'] is not None else False
+            })
+        else:
+            return jsonify({'error': 'User not found'}), 404
+    finally:
+        conn.close()
+
+# Endpoint to validate invitation token and get email
+@app.route('/api/validate-invitation', methods=['POST'])
+def validate_invitation():
+    """Validate invitation token and return email (public endpoint)"""
+    try:
+        data = request.get_json()
+        token = data.get('token')
+        
+        if not token:
+            return jsonify({'error': 'Token is required'}), 400
+        
+        is_valid, email, error_msg = validate_invitation_token(token)
+        if not is_valid:
+            return jsonify({'error': error_msg or 'Invalid invitation token'}), 400
+        
+        return jsonify({
+            'valid': True,
+            'email': email
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Admin endpoint to create invitations
+@app.route('/api/admin/create-invitation', methods=['POST'])
+@jwt_required()
+def create_invitation():
+    """Create an invitation token for a new user (admin only)"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        # Check if user is admin
+        if not is_admin_user(current_user_email):
+            return jsonify({'error': 'Admin access required'}), 403
+        
+        data = request.get_json()
+        email = data.get('email')
+        
+        if not email:
+            return jsonify({'error': 'Email is required'}), 400
+        
+        # Validate email format
+        email = email.strip().lower()
+        if not re.match(r'^[^@]+@[^@]+\.[^@]+$', email):
+            return jsonify({'error': 'Invalid email format'}), 400
+        
+        # Check if user already exists
+        conn = get_db()
+        try:
+            existing_user = conn.execute(
+                'SELECT id FROM users WHERE email = ?', (email,)
+            ).fetchone()
+            if existing_user:
+                return jsonify({'error': 'User with this email already exists'}), 409
+            
+            # Check if there's already a pending invitation for this email
+            pending_invitation = conn.execute(
+                '''SELECT id FROM invitation_tokens 
+                   WHERE email = ? AND used_at IS NULL AND expires_at > ?''',
+                (email, datetime.utcnow().isoformat())
+            ).fetchone()
+            if pending_invitation:
+                return jsonify({'error': 'A pending invitation already exists for this email'}), 409
+            
+            # Generate invitation token (JWT with 7-day expiration)
+            expires_at = datetime.utcnow() + timedelta(days=7)
+            payload = {
+                'email': email,
+                'purpose': 'invitation',
+                'exp': int(expires_at.timestamp()),
+                'iat': int(datetime.utcnow().timestamp())
+            }
+            secret = app.config['JWT_SECRET_KEY']
+            token = jwt_lib.encode(payload, secret, algorithm='HS256')
+            
+            # Store token in database
+            conn.execute(
+                '''INSERT INTO invitation_tokens (email, token, expires_at, created_by)
+                   VALUES (?, ?, ?, ?)''',
+                (email, token, expires_at.isoformat(), current_user_email)
+            )
+            conn.commit()
+            
+            # Generate invitation URL
+            base_url = request.host_url.rstrip('/')
+            # Handle both /app route and root route
+            if base_url.endswith('/app'):
+                base_url = base_url[:-4]
+            invitation_url = f"{base_url}/app?register=1&token={token}"
+            
+            return jsonify({
+                'success': True,
+                'email': email,
+                'token': token,
+                'invitation_url': invitation_url,
+                'expires_at': expires_at.isoformat()
+            }), 201
+            
+        except sqlite3.IntegrityError:
+            return jsonify({'error': 'Invitation token already exists'}), 409
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        print(f"Error creating invitation: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
