@@ -28,6 +28,10 @@ def rate_limit(max_requests=10, window_seconds=60):
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
+            # Allow OPTIONS requests (CORS preflight) to pass through without rate limiting
+            if request.method == 'OPTIONS':
+                return f(*args, **kwargs)
+            
             client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
             now = time.time()
             request_counts[client_ip] = [t for t in request_counts[client_ip] if now - t < window_seconds]
@@ -50,7 +54,11 @@ app.config['REPORTS_FOLDER'] = 'reports'
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 
 # Initialize extensions
-CORS(app, origins=['http://localhost:5173', 'https://xlsvc.jsilverman.ca'])
+CORS(app, 
+     origins=['http://localhost:5173', 'https://xlsvc.jsilverman.ca'],
+     supports_credentials=True,
+     allow_headers=['Content-Type', 'Authorization'],
+     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 jwt = JWTManager(app)
 
 # Security headers middleware
