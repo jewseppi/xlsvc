@@ -2300,6 +2300,111 @@ def create_invitation():
         print(f"Error creating invitation: {e}")
         import traceback
         traceback.print_exc()
+            return jsonify({'error': str(e)}), 500
+
+# Admin endpoint to list all invitations
+@app.route('/api/admin/invitations', methods=['GET'])
+@jwt_required()
+def list_invitations():
+    """List all invitations (admin only)"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        # Check if user is admin
+        if not is_admin_user(current_user_email):
+            return jsonify({'error': 'Admin access required'}), 403
+        
+        conn = get_db()
+        try:
+            # Get all invitations
+            invitations = conn.execute(
+                '''SELECT id, email, token, created_at, expires_at, used_at, created_by
+                   FROM invitation_tokens
+                   ORDER BY created_at DESC'''
+            ).fetchall()
+            
+            # Format invitations with status
+            result = []
+            now = datetime.utcnow()
+            for inv in invitations:
+                inv_dict = dict(inv)
+                expires_at = datetime.fromisoformat(inv_dict['expires_at'])
+                
+                # Determine status
+                if inv_dict['used_at']:
+                    status = 'used'
+                elif now > expires_at:
+                    status = 'expired'
+                else:
+                    status = 'pending'
+                
+                inv_dict['status'] = status
+                result.append(inv_dict)
+            
+            return jsonify({'invitations': result}), 200
+            
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        print(f"Error listing invitations: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# Admin endpoint to expire/revoke an invitation
+@app.route('/api/admin/invitations/<int:invitation_id>/expire', methods=['POST'])
+@jwt_required()
+def expire_invitation(invitation_id):
+    """Expire/revoke a pending invitation (admin only)"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        # Check if user is admin
+        if not is_admin_user(current_user_email):
+            return jsonify({'error': 'Admin access required'}), 403
+        
+        conn = get_db()
+        try:
+            # Get invitation
+            invitation = conn.execute(
+                'SELECT id, email, used_at, expires_at FROM invitation_tokens WHERE id = ?',
+                (invitation_id,)
+            ).fetchone()
+            
+            if not invitation:
+                return jsonify({'error': 'Invitation not found'}), 404
+            
+            inv_dict = dict(invitation)
+            
+            # Check if already used
+            if inv_dict['used_at']:
+                return jsonify({'error': 'Invitation has already been used'}), 400
+            
+            # Check if already expired
+            expires_at = datetime.fromisoformat(inv_dict['expires_at'])
+            if datetime.utcnow() > expires_at:
+                return jsonify({'error': 'Invitation has already expired'}), 400
+            
+            # Mark as used (effectively revoking it)
+            conn.execute(
+                'UPDATE invitation_tokens SET used_at = ? WHERE id = ?',
+                (datetime.utcnow().isoformat(), invitation_id)
+            )
+            conn.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': f'Invitation for {inv_dict["email"]} has been revoked'
+            }), 200
+            
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        print(f"Error expiring invitation: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
