@@ -1980,9 +1980,12 @@ def get_job_status(job_id):
         ).fetchone()
         
         job = conn.execute(
-            '''SELECT pj.*, f.original_filename as result_filename
+            '''SELECT pj.*, 
+               f.original_filename as result_filename,
+               rf.original_filename as report_filename
                FROM processing_jobs pj
                LEFT JOIN files f ON pj.result_file_id = f.id
+               LEFT JOIN files rf ON pj.report_file_id = rf.id
                WHERE pj.job_id = ? AND pj.user_id = ?''',
             (job_id, user['id'])
         ).fetchone()
@@ -2000,6 +2003,9 @@ def get_job_status(job_id):
         if job['status'] == 'completed':
             response['download_file_id'] = job['result_file_id']
             response['download_filename'] = job['result_filename']
+            if job['report_file_id']:
+                response['report_file_id'] = job['report_file_id']
+                response['report_filename'] = job['report_filename']
         elif job['status'] == 'failed':
             response['error'] = job['error_message']
         
