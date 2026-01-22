@@ -2288,12 +2288,13 @@ def create_invitation():
             )
             conn.commit()
             
-            # Generate invitation URL
-            base_url = request.host_url.rstrip('/')
-            # Handle both /app route and root route
-            if base_url.endswith('/app'):
-                base_url = base_url[:-4]
-            invitation_url = f"{base_url}/app?register=1&token={token}"
+            # Generate invitation URL - use frontend URL, not backend
+            # Frontend is at https://xlsvc.jsilverman.ca
+            # Backend is at https://api.xlsvc.jsilverman.ca
+            frontend_url = os.environ.get('FRONTEND_URL', 'https://xlsvc.jsilverman.ca')
+            if request.host.startswith('localhost'):
+                frontend_url = 'http://localhost:5173'
+            invitation_url = f"{frontend_url}/app?register=1&token={token}"
             
             return jsonify({
                 'success': True,
