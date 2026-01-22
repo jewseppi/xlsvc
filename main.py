@@ -2458,5 +2458,201 @@ def expire_invitation(invitation_id):
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+# Admin endpoint to list all users
+@app.route('/api/admin/users', methods=['GET'])
+@jwt_required()
+def list_users():
+    """List all users with file counts (admin only)"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        # Check if user is admin
+        if not is_admin_user(current_user_email):
+            return jsonify({'error': 'Admin access required'}), 403
+        
+        conn = get_db()
+        try:
+            # Get all users
+            users = conn.execute(
+                '''SELECT id, email, created_at, is_admin 
+                   FROM users 
+                   ORDER BY created_at DESC'''
+            ).fetchall()
+            
+            # Get file counts for each user
+            result = []
+            for user in users:
+                user_dict = dict(user)
+                user_id = user_dict['id']
+                
+                # Count files for this user
+                file_count = conn.execute(
+                    'SELECT COUNT(*) as count FROM files WHERE user_id = ?',
+                    (user_id,)
+                ).fetchone()['count']
+                
+                user_dict['file_count'] = file_count
+                user_dict['is_admin'] = bool(user_dict['is_admin']) if user_dict['is_admin'] is not None else False
+                result.append(user_dict)
+            
+            return jsonify({'users': result}), 200
+            
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        print(f"Error listing users: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# Admin endpoint to get user details
+@app.route('/api/admin/users/<int:user_id>', methods=['GET'])
+@jwt_required()
+def get_user_details(user_id):
+    """Get detailed information about a user (admin only)"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        # Check if user is admin
+        if not is_admin_user(current_user_email):
+            return jsonify({'error': 'Admin access required'}), 403
+        
+        conn = get_db()
+        try:
+            # Get user info
+            user = conn.execute(
+                '''SELECT id, email, created_at, is_admin 
+                   FROM users WHERE id = ?''',
+                (user_id,)
+            ).fetchone()
+            
+            if not user:
+                return jsonify({'error': 'User not found'}), 404
+            
+            user_dict = dict(user)
+            
+            # Count files
+            file_count = conn.execute(
+                'SELECT COUNT(*) as count FROM files WHERE user_id = ?',
+                (user_id,)
+            ).fetchone()['count']
+            
+            # Count processing jobs
+            job_count = conn.execute(
+                'SELECT COUNT(*) as count FROM processing_jobs WHERE user_id = ?',
+                (user_id,)
+            ).fetchone()['count']
+            
+            user_dict['file_count'] = file_count
+            user_dict['job_count'] = job_count
+            user_dict['is_admin'] = bool(user_dict['is_admin']) if user_dict['is_admin'] is not None else False
+            
+            return jsonify(user_dict), 200
+            
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        print(f"Error getting user details: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# Admin endpoint to delete a user
+@app.route('/api/admin/users/<int:user_id>', methods=['DELETE'])
+@jwt_required()
+def delete_user(user_id):
+    """Delete a user and all their data (admin only)"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        # Check if user is admin
+        if not is_admin_user(current_user_email):
+            return jsonify({'error': 'Admin access required'}), 403
+        
+        conn = get_db()
+        try:
+            # Get current user's ID
+            current_user = conn.execute(
+                'SELECT id FROM users WHERE email = ?',
+                (current_user_email,)
+            ).fetchone()
+            
+            if not current_user:
+                return jsonify({'error': 'Current user not found'}), 404
+            
+            current_user_id = current_user['id']
+            
+            # Cannot delete yourself
+            if user_id == current_user_id:
+                return jsonify({'error': 'Cannot delete your own account'}), 400
+            
+            # Get user to delete
+            user_to_delete = conn.execute(
+                'SELECT id, email, is_admin FROM users WHERE id = ?',
+                (user_id,)
+            ).fetchone()
+            
+            if not user_to_delete:
+                return jsonify({'error': 'User not found'}), 404
+            
+            # Check if this is the last admin
+            admin_count = conn.execute(
+                'SELECT COUNT(*) as count FROM users WHERE is_admin = 1'
+            ).fetchone()['count']
+            
+            if user_to_delete['is_admin'] and admin_count <= 1:
+                return jsonify({'error': 'Cannot delete the last admin user'}), 400
+            
+            # Get all files for this user
+            user_files = conn.execute(
+                '''SELECT id, stored_filename, file_type 
+                   FROM files WHERE user_id = ?''',
+                (user_id,)
+            ).fetchall()
+            
+            # Delete files from disk
+            for file_record in user_files:
+                file_dict = dict(file_record)
+                file_path = get_file_path(
+                    file_dict.get('file_type'),
+                    file_dict['stored_filename']
+                )
+                if os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                        print(f"Deleted file from disk: {file_path}")
+                    except Exception as e:
+                        print(f"Warning: Could not delete file {file_path}: {e}")
+            
+            # Delete all user's files from database
+            conn.execute('DELETE FROM files WHERE user_id = ?', (user_id,))
+            
+            # Delete all user's processing jobs
+            conn.execute('DELETE FROM processing_jobs WHERE user_id = ?', (user_id,))
+            
+            # Delete all invitation tokens created by this user
+            conn.execute('DELETE FROM invitation_tokens WHERE created_by = ?', (user_to_delete['email'],))
+            
+            # Delete the user
+            conn.execute('DELETE FROM users WHERE id = ?', (user_id,))
+            
+            conn.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': f'User {user_to_delete["email"]} and all associated data have been deleted'
+            }), 200
+            
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        print(f"Error deleting user: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     app.run(debug=True)
