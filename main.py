@@ -2123,12 +2123,12 @@ def get_generated_files(file_id):
         # Get all generated files for this parent file
         # This includes files directly referencing this file_id in various ways
         
-        # Get macros, instructions, and reports that have parent_file_id set
+        # Get macros, instructions, reports, and processed files that have parent_file_id set
         generated_with_parent = conn.execute(
             '''SELECT id, original_filename, file_type, file_size, upload_date 
                FROM files 
                WHERE parent_file_id = ? AND user_id = ?
-               AND file_type IN ('macro', 'instructions', 'report')
+               AND file_type IN ('macro', 'instructions', 'report', 'processed')
                ORDER BY upload_date DESC''',
             (file_id, user['id'])
         ).fetchall()
@@ -2139,12 +2139,12 @@ def get_generated_files(file_id):
             '''SELECT id, original_filename, file_type, file_size, upload_date 
                FROM files 
                WHERE user_id = ? 
-               AND file_type IN ('macro', 'instructions', 'report')
-               AND (original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ?)
+               AND file_type IN ('macro', 'instructions', 'report', 'processed')
+               AND (original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ?)
                AND (parent_file_id IS NULL OR parent_file_id != ?)
                ORDER BY upload_date DESC''',
             (user['id'], f'Macro_{original_filename}%', f'Instructions_{original_filename}%', 
-             f'DeletionReport_{original_filename}%', file_id)
+             f'DeletionReport_{original_filename}%', f'processed_{original_filename}%', file_id)
         ).fetchall()
         
         conn.close()
@@ -2163,11 +2163,13 @@ def get_generated_files(file_id):
         macros = [f for f in unique_files if f['file_type'] == 'macro']
         instructions = [f for f in unique_files if f['file_type'] == 'instructions']
         reports = [f for f in unique_files if f['file_type'] == 'report']
+        processed = [f for f in unique_files if f['file_type'] == 'processed']
         
         return jsonify({
             'macros': macros,
             'instructions': instructions,
-            'reports': reports
+            'reports': reports,
+            'processed': processed
         }), 200
         
     except Exception as e:
