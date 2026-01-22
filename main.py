@@ -2287,6 +2287,13 @@ def create_invitation():
             if pending_invitation:
                 return jsonify({'error': 'A pending invitation already exists for this email'}), 409
             
+            # Delete any expired or used invitations for this email to avoid UNIQUE constraint issues
+            conn.execute(
+                '''DELETE FROM invitation_tokens 
+                   WHERE email = ? AND (used_at IS NOT NULL OR expires_at <= ?)''',
+                (email, datetime.utcnow().isoformat())
+            )
+            
             # Generate invitation token (JWT with 7-day expiration)
             expires_at = datetime.utcnow() + timedelta(days=7)
             payload = {
@@ -2322,8 +2329,17 @@ def create_invitation():
                 'expires_at': expires_at.isoformat()
             }), 201
             
-        except sqlite3.IntegrityError:
-            return jsonify({'error': 'Invitation token already exists'}), 409
+        except sqlite3.IntegrityError as e:
+            # This should rarely happen now since we delete old invitations
+            # But handle it gracefully if it does
+            error_msg = str(e)
+            if 'UNIQUE constraint' in error_msg and 'email' in error_msg:
+                return jsonify({'error': 'An invitation for this email already exists. Please expire the existing invitation first or wait for it to expire.'}), 409
+            elif 'UNIQUE constraint' in error_msg and 'token' in error_msg:
+                # Token collision (extremely rare)
+                return jsonify({'error': 'Token collision occurred. Please try again.'}), 409
+            else:
+                return jsonify({'error': 'Database constraint violation. Please try again.'}), 409
         finally:
             conn.close()
             
