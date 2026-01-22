@@ -21,8 +21,15 @@ jobs:
 
       - name: Download input file
         run: |
-          curl -L "${{ github.event.client_payload.file_url }}" -o input.xlsx
+          echo "Downloading file from: ${{ github.event.client_payload.file_url }}"
+          curl -L --max-time 60 --connect-timeout 10 --retry 3 --retry-delay 5 \
+            "${{ github.event.client_payload.file_url }}" -o input.xlsx
+          if [ ! -f input.xlsx ] || [ ! -s input.xlsx ]; then
+            echo "❌ Failed to download file or file is empty"
+            exit 1
+          fi
           ls -la input.xlsx
+          echo "✅ File downloaded successfully, size: $(stat -c%s input.xlsx) bytes"
 
       - name: Start LibreOffice headless
         run: |
