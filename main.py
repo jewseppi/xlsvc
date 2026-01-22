@@ -2297,12 +2297,14 @@ def create_invitation():
             )
             
             # Generate invitation token (JWT with 7-day expiration)
-            expires_at = datetime.utcnow() + timedelta(days=7)
+            # Use time.time() for consistency with download tokens
+            now = int(time.time())
+            expires_at = datetime.utcnow() + timedelta(days=7)  # For database storage
             payload = {
                 'email': email,
                 'purpose': 'invitation',
-                'exp': int(expires_at.timestamp()),
-                'iat': int(datetime.utcnow().timestamp())
+                'exp': now + (7 * 24 * 60 * 60),  # 7 days in seconds
+                'iat': now
             }
             secret = app.config['JWT_SECRET_KEY']
             token = jwt_lib.encode(payload, secret, algorithm='HS256')
