@@ -159,7 +159,8 @@ def verify_download_token(token):
     """Verify and decode download token"""
     try:
         secret = app.config['JWT_SECRET_KEY']
-        payload = jwt_lib.decode(token, secret, algorithms=['HS256'])
+        # Allow 60 seconds leeway for clock skew
+        payload = jwt_lib.decode(token, secret, algorithms=['HS256'], leeway=60)
         
         # Check if token is for download purpose
         if payload.get('purpose') != 'download':
@@ -439,7 +440,8 @@ def validate_invitation_token(token):
     """
     try:
         secret = app.config['JWT_SECRET_KEY']
-        payload = jwt_lib.decode(token, secret, algorithms=['HS256'])
+        # Allow 60 seconds leeway for clock skew
+        payload = jwt_lib.decode(token, secret, algorithms=['HS256'], leeway=60)
         
         if payload.get('purpose') != 'invitation':
             return False, None, 'Invalid token purpose'
