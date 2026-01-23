@@ -8,3 +8,11 @@ requests
 python-multipart
 PyJWT==2.8.0
 cryptography>=3.4.8
+
+# Testing dependencies
+pytest==7.4.3
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+pytest-html==4.1.1
+pytest-json-report==1.5.0
+coverage==7.3.2
