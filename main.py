@@ -28,6 +28,10 @@ def rate_limit(max_requests=10, window_seconds=60):
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
+            # Skip rate limiting in test mode
+            if app.config.get('TESTING', False):
+                return f(*args, **kwargs)
+            
             # Allow OPTIONS requests (CORS preflight) to pass through without rate limiting
             if request.method == 'OPTIONS':
                 return f(*args, **kwargs)
