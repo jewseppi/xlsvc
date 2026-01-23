@@ -2123,6 +2123,97 @@ def get_file_history(file_id):
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/files/<int:file_id>/history/<job_id>', methods=['DELETE'])
+@jwt_required()
+def delete_history_item(file_id, job_id):
+    """Delete a single processing job from history"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        conn = get_db()
+        user = conn.execute(
+            'SELECT id FROM users WHERE email = ?', (current_user_email,)
+        ).fetchone()
+        
+        if not user:
+            conn.close()
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Verify user owns the file and the job
+        job = conn.execute(
+            '''SELECT pj.* FROM processing_jobs pj
+               JOIN files f ON pj.original_file_id = f.id
+               WHERE pj.job_id = ? AND pj.original_file_id = ? AND pj.user_id = ?''',
+            (job_id, file_id, user['id'])
+        ).fetchone()
+        
+        if not job:
+            conn.close()
+            return jsonify({'error': 'Job not found or access denied'}), 404
+        
+        # Delete the processing job
+        conn.execute('DELETE FROM processing_jobs WHERE job_id = ?', (job_id,))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'message': 'History item deleted successfully'}), 200
+        
+    except Exception as e:
+        print(f"ERROR: delete_history_item: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/files/<int:file_id>/history', methods=['DELETE'])
+@jwt_required()
+def clear_file_history(file_id):
+    """Clear all processing history for a file (admin only)"""
+    try:
+        current_user_email = get_jwt_identity()
+        
+        conn = get_db()
+        user = conn.execute(
+            'SELECT id, is_admin FROM users WHERE email = ?', (current_user_email,)
+        ).fetchone()
+        
+        if not user:
+            conn.close()
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Check if user is admin
+        if not user.get('is_admin'):
+            conn.close()
+            return jsonify({'error': 'Admin access required'}), 403
+        
+        # Verify the file exists
+        file_info = conn.execute(
+            'SELECT id FROM files WHERE id = ?', (file_id,)
+        ).fetchone()
+        
+        if not file_info:
+            conn.close()
+            return jsonify({'error': 'File not found'}), 404
+        
+        # Delete all processing jobs for this file
+        deleted_count = conn.execute(
+            'DELETE FROM processing_jobs WHERE original_file_id = ?',
+            (file_id,)
+        ).rowcount
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            'message': f'Cleared {deleted_count} history items',
+            'deleted_count': deleted_count
+        }), 200
+        
+    except Exception as e:
+        print(f"ERROR: clear_file_history: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/job-status/<job_id>', methods=['GET'])
 @jwt_required()
 def get_job_status(job_id):
