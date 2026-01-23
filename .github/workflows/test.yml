@@ -61,15 +61,9 @@ jobs:
             test-report.json
             test-results.xml
       
-      - name: Publish test results
-        uses: dorny/test-reporter@v1
-        if: always()
-        with:
-          name: Backend Tests
-          path: test-results.xml
-          reporter: java-junit
-          list-suites: all
-          max-annotations: 50
+      # Note: Test results are uploaded as artifacts above
+      # The dorny/test-reporter requires additional permissions that may not be available
+      # Test results can be viewed in the uploaded artifacts (test-results.xml, test-report.html)
   
   notify-on-failure:
     needs: [backend-tests]
