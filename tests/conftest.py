@@ -51,11 +51,12 @@ def test_directories():
 def test_app(test_db_path, test_directories, monkeypatch):
     """Create a Flask app instance for testing"""
     # Set environment variables
-    monkeypatch.setenv('SECRET_KEY', 'test-secret-key-for-testing-only')
+    test_secret = 'test-secret-key-for-testing-only-12345678901234567890'
+    monkeypatch.setenv('SECRET_KEY', test_secret)
     
     # Configure app for testing
     app.config['TESTING'] = True
-    app.config['JWT_SECRET_KEY'] = 'test-secret-key-for-testing-only'
+    app.config['JWT_SECRET_KEY'] = test_secret
     app.config['UPLOAD_FOLDER'] = test_directories['uploads']
     app.config['PROCESSED_FOLDER'] = test_directories['processed']
     app.config['MACROS_FOLDER'] = test_directories['macros']
@@ -236,7 +237,8 @@ def auth_token(client, test_user):
         'password': test_user['password']
     })
     if response.status_code == 200:
-        return response.json.get('access_token')
+        data = response.get_json()
+        return data.get('access_token')
     return None
 
 
