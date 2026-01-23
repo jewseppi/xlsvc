@@ -114,7 +114,8 @@ class TestFileUpload:
                 content_type='multipart/form-data'
             )
         
-        assert response.status_code == 200, f"Expected 200, got {response.status_code}. Response: {response.get_json()}"
+        # Upload returns 201 for new files, 200 for duplicates
+        assert response.status_code in [200, 201], f"Expected 200 or 201, got {response.status_code}. Response: {response.get_json()}"
         data = response.get_json()
         assert 'file_id' in data
         assert 'filename' in data
@@ -171,7 +172,8 @@ class TestFileList:
         
         assert response.status_code == 200, f"Expected 200, got {response.status_code}. Response: {response.get_json()}"
         data = response.get_json()
-        assert isinstance(data, list)
+        assert 'files' in data
+        assert isinstance(data['files'], list)
     
     def test_get_files_unauthenticated(self, client):
         """Test getting files list without authentication"""

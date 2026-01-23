@@ -30,7 +30,8 @@ class TestProcessFileEndpoint:
                 content_type='multipart/form-data'
             )
         
-        assert upload_response.status_code == 200, f"Upload failed: {upload_response.get_json()}"
+        # Upload returns 201 for new files, 200 for duplicates
+        assert upload_response.status_code in [200, 201], f"Upload failed: {upload_response.get_json()}"
         file_id = upload_response.get_json()['file_id']
         
         # Try to process without filter_rules
@@ -57,7 +58,8 @@ class TestProcessFileEndpoint:
                 content_type='multipart/form-data'
             )
         
-        assert upload_response.status_code == 200, f"Upload failed: {upload_response.get_json()}"
+        # Upload returns 201 for new files, 200 for duplicates
+        assert upload_response.status_code in [200, 201], f"Upload failed: {upload_response.get_json()}"
         file_id = upload_response.get_json()['file_id']
         
         # Try to process with empty filter_rules
@@ -83,7 +85,8 @@ class TestProcessFileEndpoint:
                 content_type='multipart/form-data'
             )
         
-        assert upload_response.status_code == 200, f"Upload failed: {upload_response.get_json()}"
+        # Upload returns 201 for new files, 200 for duplicates
+        assert upload_response.status_code in [200, 201], f"Upload failed: {upload_response.get_json()}"
         file_id = upload_response.get_json()['file_id']
         
         # Process with default filter rules (F, G, H, I = 0)
@@ -126,7 +129,8 @@ class TestProcessFileEndpoint:
                 content_type='multipart/form-data'
             )
         
-        assert upload_response.status_code == 200, f"Upload failed: {upload_response.get_json()}"
+        # Upload returns 201 for new files, 200 for duplicates
+        assert upload_response.status_code in [200, 201], f"Upload failed: {upload_response.get_json()}"
         file_id = upload_response.get_json()['file_id']
         
         # Process with filter rules that won't match (all columns = 999)
@@ -160,7 +164,8 @@ class TestProcessFileEndpoint:
                 content_type='multipart/form-data'
             )
         
-        assert upload_response.status_code == 200, f"Upload failed: {upload_response.get_json()}"
+        # Upload returns 201 for new files, 200 for duplicates
+        assert upload_response.status_code in [200, 201], f"Upload failed: {upload_response.get_json()}"
         file_id = upload_response.get_json()['file_id']
         
         # Process file
