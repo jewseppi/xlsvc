@@ -99,48 +99,123 @@ def get_file_path(file_type, filename):
     else:
         return os.path.join(app.config['UPLOAD_FOLDER'], filename)
     
-def maybe_cleanup_old_files():
+def cleanup_old_files():
     """
-    Lazy cleanup - runs with 5% probability on authenticated requests.
-    Deletes generated files (processed, macros, instructions, reports) older than 30 days.
-    Original uploads are preserved.
+    Cleanup expired files - deletes all files (original and generated) older than 24 hours.
+    When an original file is deleted, all related files (processed, macros, instructions, reports)
+    and processing jobs are also deleted (cascade deletion).
     """
-    if random.random() > 0.05:
-        return
-
     try:
-        cutoff = datetime.utcnow() - timedelta(days=30)
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        cutoff_iso = cutoff.isoformat()
         conn = get_db()
+        deleted_count = 0
 
-        old_files = conn.execute(
-            '''SELECT id, stored_filename, file_type FROM files
+        # Step 1: Find and delete old original files with cascade deletion
+        old_originals = conn.execute(
+            '''SELECT id, stored_filename FROM files
                WHERE upload_date < ?
-               AND file_type IN ('processed', 'macro', 'instructions', 'report')''',
-            (cutoff.isoformat(),)
+               AND (file_type = 'original' OR file_type IS NULL)''',
+            (cutoff_iso,)
         ).fetchall()
 
-        deleted_count = 0
-        for f in old_files:
-            f_dict = dict(f)
-            file_path = get_file_path(f_dict['file_type'], f_dict['stored_filename'])
-
-            if os.path.exists(file_path):
-                os.remove(file_path)
-
-            if f_dict['file_type'] == 'processed':
-                conn.execute('DELETE FROM processing_jobs WHERE result_file_id = ?', (f_dict['id'],))
-
-            conn.execute('DELETE FROM files WHERE id = ?', (f_dict['id'],))
+        for original in old_originals:
+            original_dict = dict(original)
+            original_id = original_dict['id']
+            
+            # Find all related files (processed, macros, instructions, reports)
+            related_files = conn.execute(
+                '''SELECT id, stored_filename, file_type FROM files
+                   WHERE parent_file_id = ?''',
+                (original_id,)
+            ).fetchall()
+            
+            # Delete all related files first
+            for related_file in related_files:
+                related_dict = dict(related_file)
+                file_path = get_file_path(related_dict['file_type'], related_dict['stored_filename'])
+                
+                if os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        print(f"Warning: Could not delete file {file_path}: {e}")
+                
+                # Delete related processing jobs
+                if related_dict['file_type'] == 'processed':
+                    conn.execute('DELETE FROM processing_jobs WHERE result_file_id = ?', (related_dict['id'],))
+                    conn.execute('DELETE FROM processing_jobs WHERE original_file_id = ? AND result_file_id IS NULL', (original_id,))
+                
+                # Delete file record
+                conn.execute('DELETE FROM files WHERE id = ?', (related_dict['id'],))
+                deleted_count += 1
+            
+            # Delete original file from disk
+            original_path = get_file_path('original', original_dict['stored_filename'])
+            if os.path.exists(original_path):
+                try:
+                    os.remove(original_path)
+                except Exception as e:
+                    print(f"Warning: Could not delete original file {original_path}: {e}")
+            
+            # Delete any remaining processing jobs for this original file
+            conn.execute('DELETE FROM processing_jobs WHERE original_file_id = ?', (original_id,))
+            
+            # Delete original file record
+            conn.execute('DELETE FROM files WHERE id = ?', (original_id,))
             deleted_count += 1
+
+        # Step 2: Delete orphaned generated files (where original was already deleted)
+        orphaned_files = conn.execute(
+            '''SELECT id, stored_filename, file_type FROM files
+               WHERE upload_date < ?
+               AND file_type IN ('processed', 'macro', 'instructions', 'report')
+               AND (parent_file_id IS NULL OR parent_file_id NOT IN (SELECT id FROM files))''',
+            (cutoff_iso,)
+        ).fetchall()
+
+        for orphaned in orphaned_files:
+            orphaned_dict = dict(orphaned)
+            file_path = get_file_path(orphaned_dict['file_type'], orphaned_dict['stored_filename'])
+            
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    print(f"Warning: Could not delete orphaned file {file_path}: {e}")
+            
+            # Delete related processing jobs
+            if orphaned_dict['file_type'] == 'processed':
+                conn.execute('DELETE FROM processing_jobs WHERE result_file_id = ?', (orphaned_dict['id'],))
+            
+            # Delete file record
+            conn.execute('DELETE FROM files WHERE id = ?', (orphaned_dict['id'],))
+            deleted_count += 1
+
+        # Step 3: Delete old processing_jobs records (completed/failed) older than 24 hours
+        old_jobs = conn.execute(
+            '''DELETE FROM processing_jobs
+               WHERE (status = 'completed' OR status = 'failed')
+               AND created_at < ?''',
+            (cutoff_iso,)
+        )
+        jobs_deleted = old_jobs.rowcount
+        if jobs_deleted > 0:
+            deleted_count += jobs_deleted
+            print(f"CLEANUP: Deleted {jobs_deleted} old processing job records")
 
         if deleted_count > 0:
             conn.commit()
-            print(f"AUTO-CLEANUP: Deleted {deleted_count} files older than 30 days")
+            print(f"CLEANUP: Deleted {deleted_count} files and job records older than 24 hours")
+        else:
+            print("CLEANUP: No expired files found")
 
         conn.close()
 
     except Exception as e:
-        print(f"AUTO-CLEANUP ERROR: {str(e)}")
+        print(f"CLEANUP ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 def generate_download_token(file_id, user_id, expires_in_minutes=30):
     """Generate a temporary download token for GitHub Actions"""
@@ -736,8 +811,6 @@ def get_files():
                 print(f"DEBUG: File not found on disk: {file_path}")
         
         conn.close()
-
-        maybe_cleanup_old_files()  # Lazy cleanup of old generated files
         
         return jsonify({
             'files': valid_files
@@ -1639,6 +1712,61 @@ class GitHubAppAuth:
         except Exception as e:
             print(f"DEBUG: Error getting installation token: {str(e)}")
             raise
+    
+    def delete_artifact_by_job_id(self, job_id):
+        """Delete GitHub artifact by job_id (artifact name is processed-excel-{job_id})"""
+        try:
+            github_token = self.get_installation_token()
+            github_repo = os.getenv('GITHUB_REPO', 'jewseppi/xlsvc')
+            artifact_name = f"processed-excel-{job_id}"
+            
+            headers = {
+                'Authorization': f'Bearer {github_token}',
+                'Accept': 'application/vnd.github.v3+json',
+                'User-Agent': 'Excel-Processor-App/1.0'
+            }
+            
+            # List artifacts to find the one we want to delete
+            # GitHub API doesn't support deleting by name, so we need to find it first
+            list_url = f'https://api.github.com/repos/{github_repo}/actions/artifacts'
+            print(f"DEBUG: Listing artifacts to find: {artifact_name}")
+            
+            response = requests.get(list_url, headers=headers, timeout=10)
+            
+            if response.status_code != 200:
+                print(f"DEBUG: Failed to list artifacts: {response.status_code} {response.text}")
+                return False
+            
+            artifacts = response.json().get('artifacts', [])
+            artifact_id = None
+            
+            for artifact in artifacts:
+                if artifact.get('name') == artifact_name:
+                    artifact_id = artifact.get('id')
+                    break
+            
+            if not artifact_id:
+                print(f"DEBUG: Artifact {artifact_name} not found (may have already been deleted)")
+                return False
+            
+            # Delete the artifact
+            delete_url = f'https://api.github.com/repos/{github_repo}/actions/artifacts/{artifact_id}'
+            print(f"DEBUG: Deleting artifact {artifact_name} (ID: {artifact_id})")
+            
+            delete_response = requests.delete(delete_url, headers=headers, timeout=10)
+            
+            if delete_response.status_code == 204:
+                print(f"DEBUG: Successfully deleted artifact {artifact_name}")
+                return True
+            else:
+                print(f"DEBUG: Failed to delete artifact: {delete_response.status_code} {delete_response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"DEBUG: Error deleting artifact: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
         
 @app.route('/api/process-automated/<int:file_id>', methods=['POST'])
 @jwt_required()
@@ -1895,6 +2023,14 @@ def processing_callback():
         
         print(f"=== CALLBACK SUCCESSFUL ===")
         print(f"Job {job_id} completed, file_id={file_id}, report_file_id={report_file_id}, deleted_rows={deleted_rows}")
+        
+        # Delete GitHub artifact after successful upload
+        try:
+            github_auth = GitHubAppAuth()
+            github_auth.delete_artifact_by_job_id(job_id)
+        except Exception as e:
+            print(f"DEBUG: Failed to delete GitHub artifact (non-critical): {str(e)}")
+            # Don't fail the callback if artifact deletion fails
         
         return jsonify({
             'status': 'success',

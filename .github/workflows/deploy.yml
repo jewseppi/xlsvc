@@ -113,6 +113,32 @@ jobs:
 
             echo "Flask backend deployment complete!"
 
+      - name: Setup Cron Job
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+            
+            # Build the cron command with proper paths
+            DEPLOY_PATH="${{ secrets.DEPLOY_PATH }}/api/xlsvc"
+            PYTHON_PATH="${{ secrets.PASSENGER_PYTHON_PATH }}/bin/python"
+            CRON_CMD="cd $DEPLOY_PATH && source ${{ secrets.PASSENGER_PYTHON_PATH }}/bin/activate && $PYTHON_PATH cleanup_files.py >> $DEPLOY_PATH/cleanup.log 2>&1"
+            CRON_JOB="0 2 * * * $CRON_CMD"
+            
+            # Get current crontab (if exists) and check if our job is already there
+            CURRENT_CRON=$(crontab -l 2>/dev/null || echo "")
+            
+            if echo "$CURRENT_CRON" | grep -q "cleanup_files.py"; then
+              echo "Cron job already exists, skipping setup"
+            else
+              # Add our cron job to the existing crontab
+              (echo "$CURRENT_CRON"; echo "$CRON_JOB") | crontab -
+              echo "Cron job added successfully"
+            fi
+
       - name: Verify Deployment
         run: |
           echo "Flask Backend Deployment Complete!"
