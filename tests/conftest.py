@@ -177,56 +177,76 @@ def db_connection(test_db_path):
 
 
 @pytest.fixture(scope='function')
-def test_user(db_connection):
-    """Create a test user"""
+def test_user(test_app):
+    """Create a test user using the same database connection that the app uses"""
+    from main import get_db
+    conn = get_db()
+    
     email = 'test@example.com'
     password_hash = generate_password_hash('testpassword123')
     
-    cursor = db_connection.cursor()
-    cursor.execute(
-        'INSERT OR REPLACE INTO users (email, password_hash, is_admin) VALUES (?, ?, ?)',
-        (email, password_hash, 0)
-    )
-    db_connection.commit()
-    
-    user_id = cursor.lastrowid
-    
-    yield {
-        'id': user_id,
-        'email': email,
-        'password': 'testpassword123'
-    }
-    
-    # Cleanup
-    cursor.execute('DELETE FROM users WHERE id = ?', (user_id,))
-    db_connection.commit()
+    try:
+        # Delete existing user if any
+        conn.execute('DELETE FROM users WHERE email = ?', (email,))
+        
+        # Insert new user
+        cursor = conn.execute(
+            'INSERT INTO users (email, password_hash, is_admin) VALUES (?, ?, ?)',
+            (email, password_hash, 0)
+        )
+        conn.commit()
+        
+        # Get the user ID
+        user = conn.execute('SELECT id FROM users WHERE email = ?', (email,)).fetchone()
+        user_id = user['id'] if user else cursor.lastrowid
+        
+        yield {
+            'id': user_id,
+            'email': email,
+            'password': 'testpassword123'
+        }
+    finally:
+        # Cleanup
+        conn.execute('DELETE FROM users WHERE email = ?', (email,))
+        conn.commit()
+        conn.close()
 
 
 @pytest.fixture(scope='function')
-def test_admin_user(db_connection):
-    """Create a test admin user"""
+def test_admin_user(test_app):
+    """Create a test admin user using the same database connection that the app uses"""
+    from main import get_db
+    conn = get_db()
+    
     email = 'admin@example.com'
     password_hash = generate_password_hash('adminpassword123')
     
-    cursor = db_connection.cursor()
-    cursor.execute(
-        'INSERT OR REPLACE INTO users (email, password_hash, is_admin) VALUES (?, ?, ?)',
-        (email, password_hash, 1)
-    )
-    db_connection.commit()
-    
-    user_id = cursor.lastrowid
-    
-    yield {
-        'id': user_id,
-        'email': email,
-        'password': 'adminpassword123',
-        'is_admin': True
-    }
-    
-    # Cleanup
-    cursor.execute('DELETE FROM users WHERE id = ?', (user_id,))
-    db_connection.commit()
+    try:
+        # Delete existing user if any
+        conn.execute('DELETE FROM users WHERE email = ?', (email,))
+        
+        # Insert new admin user
+        cursor = conn.execute(
+            'INSERT INTO users (email, password_hash, is_admin) VALUES (?, ?, ?)',
+            (email, password_hash, 1)
+        )
+        conn.commit()
+        
+        # Get the user ID
+        user = conn.execute('SELECT id FROM users WHERE email = ?', (email,)).fetchone()
+        user_id = user['id'] if user else cursor.lastrowid
+        
+        yield {
+            'id': user_id,
+            'email': email,
+            'password': 'adminpassword123',
+            'is_admin': True
+        }
+    finally:
+        # Cleanup
+        conn.execute('DELETE FROM users WHERE email = ?', (email,))
+        conn.commit()
+        conn.close()
 
 
 @pytest.fixture(scope='function')
@@ -238,7 +258,12 @@ def auth_token(client, test_user):
     })
     if response.status_code == 200:
         data = response.get_json()
-        return data.get('access_token')
+        token = data.get('access_token')
+        if token:
+            return token
+    # Debug: print response if login fails
+    if response.status_code != 200:
+        print(f"DEBUG: Login failed with status {response.status_code}: {response.get_json()}")
     return None
 
 
