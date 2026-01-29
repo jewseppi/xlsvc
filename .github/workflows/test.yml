@@ -65,38 +65,3 @@ jobs:
       # Note: Test results are uploaded as artifacts above
       # The dorny/test-reporter requires additional permissions that may not be available
       # Test results can be viewed in the uploaded artifacts (test-results.xml, test-report.html)
-  
-  notify-on-failure:
-    needs: [backend-tests]
-    if: failure()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Create GitHub Issue on Failure
-        if: github.event_name == 'schedule'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const title = `Test Suite Failed - Backend (${new Date().toISOString()})`;
-            const body = `The scheduled backend test suite failed. Please check the workflow run for details.
-            
-            Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
-            
-            github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: title,
-              body: body,
-              labels: ['bug', 'tests']
-            });
-      
-      - name: Comment on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: '❌ Backend tests failed. Please check the workflow run for details.'
-            });
