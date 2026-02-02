@@ -54,6 +54,7 @@ These files are excluded from the 100% coverage denominator regardless of dead c
 |------|--------|
 | passenger_wsgi.py | WSGI entry (3 lines); imports `app` from main. |
 | tests/create_test_excel.py | Test data builder for tests; not production code. |
+| process_uno.py | Runs inside LibreOffice only (UNO-dependent); not testable in pytest. |
 
 Keep this list in sync with `.coveragerc` (e.g. `[run] omit = ...`).
 

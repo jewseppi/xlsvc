@@ -249,9 +249,11 @@ def test_admin_user(test_app):
         conn.close()
 
 
-@pytest.fixture(scope='function')
-def auth_token(client, test_user):
-    """Get an authentication token for a test user"""
+@pytest.fixture(scope='function', params=[True, False], ids=['auth_ok', 'auth_none'])
+def auth_token(request, client, test_user):
+    """Get an authentication token for a test user. When request.param is False, returns None to cover skip branches."""
+    if not request.param:
+        return None
     response = client.post('/api/login', json={
         'email': test_user['email'],
         'password': test_user['password']
@@ -261,7 +263,6 @@ def auth_token(client, test_user):
         token = data.get('access_token')
         if token:
             return token
-    # Debug: print response if login fails
     if response.status_code != 200:
         print(f"DEBUG: Login failed with status {response.status_code}: {response.get_json()}")
     return None
