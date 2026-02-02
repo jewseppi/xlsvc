@@ -1,5 +1,5 @@
 [run]
-# Omit entry points, test helpers, and UNO-only code. See docs/REFACTORING_AUDIT.md.
+# Omit entry points, test helpers, and UNO-only code.
 omit =
     passenger_wsgi.py
     tests/create_test_excel.py

@@ -567,7 +567,7 @@ def validate_invitation_token(token):
         return False, None, f'Error validating token: {str(e)}'
 
 
-# Newsletter subscription endpoints (dead: frontend has no refs; see REFACTORING_AUDIT)
+# Newsletter subscription endpoints (dead: frontend has no refs)
 @app.route('/api/subscribe', methods=['POST'])
 @cross_origin(origins=['https://xlsvc.jsilverman.ca', 'http://localhost:5173'])
 def subscribe():  # pragma: no cover
@@ -2266,7 +2266,7 @@ def get_job_status(job_id):
         return jsonify({'error': str(e)}), 500
 
 def analyze_excel_file(input_path):  # pragma: no cover
-    """Analyze Excel file to find rows to delete (using your existing logic). Dead: superseded by process_file()."""
+    """Dead: superseded by process_file() + filter_rules. Not called."""
     try:
         wb = load_workbook(input_path, data_only=True)
         

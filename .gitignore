@@ -1,6 +1,9 @@
 # Local SQLite DB
 xlsvc.db
 
+# Local docs (API, refactoring) – remove from gitignore to track
+docs/
+
 # macOS
 .DS_Store
 
