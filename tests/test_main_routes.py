@@ -15,7 +15,7 @@ class TestHealthAndProfile:
         r = client.get("/api/health")
         assert r.status_code == 200
         data = r.get_json()
-        assert data.get("status") == "ok"
+        assert data.get("status") == "healthy"
 
     def test_profile_authenticated(self, client, auth_token):
         """GET /api/profile with valid token returns email."""

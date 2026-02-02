@@ -105,14 +105,14 @@ class TestCaptureRowData:
     """Tests for capture_row_data."""
 
     def test_capture_row_data_normal(self):
-        """Captures row values from openpyxl sheet."""
+        """Captures row values from openpyxl sheet; trailing empty cells are trimmed."""
         wb = Workbook()
         ws = wb.active
         ws["A1"] = "a"
         ws["B1"] = "b"
         ws["C1"] = None
         result = capture_row_data(ws, 1, max_cols=10)
-        assert result == ["a", "b", ""]
+        assert result == ["a", "b"]
 
     def test_capture_row_data_trims_trailing_empty(self):
         """Trailing empty cells are trimmed."""
