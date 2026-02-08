@@ -117,7 +117,7 @@ Generated on: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC
 
 === SUMMARY ===
 Analysis found {total_rows} rows to be deleted across {len(sheet_names)} sheet(s):
-{chr(10).join(f"\u2022 {sheet}" for sheet in sheet_names)}
+{chr(10).join("\u2022 " + sheet for sheet in sheet_names)}
 
 {filter_desc}
 
@@ -153,7 +153,7 @@ If you prefer to delete rows manually, here's what to look for:
 - Work from bottom to top to avoid row number changes
 
 Sheet-by-sheet breakdown:
-{chr(10).join(f"\u2022 {sheet}: rows to review and potentially delete" for sheet in sheet_names)}
+{chr(10).join("\u2022 " + sheet + ": rows to review and potentially delete" for sheet in sheet_names)}
 
 === IMPORTANT NOTES ===
 - This process will preserve all images, charts, and formatting
