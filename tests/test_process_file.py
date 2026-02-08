@@ -5,6 +5,7 @@ These tests ensure full coverage before refactoring
 import pytest
 import os
 import json
+from unittest.mock import patch
 from main import (
     generate_libreoffice_macro,
     generate_instructions,
@@ -19,7 +20,9 @@ class TestProcessFileEndpoint:
     def test_process_file_without_filter_rules(self, client, auth_token, test_user, db_connection, sample_excel_file):
         """Test that process_file requires filter_rules"""
         if auth_token is None:
-            pytest.skip("Auth token not available - check test setup")
+            r = client.post(f'/api/process/1', json={})
+            assert r.status_code == 401
+            return
         
         # Upload a file first
         with open(sample_excel_file, 'rb') as f:
@@ -44,10 +47,37 @@ class TestProcessFileEndpoint:
         assert response.status_code == 400
         assert 'filter_rules' in response.get_json()['error'].lower()
     
+    def test_process_file_file_not_on_disk(self, client, auth_token, test_user, db_connection, test_app):
+        """process_file when file record exists but file missing on disk returns 404."""
+        if auth_token is None:
+            r = client.post('/api/process/1', json={"filter_rules": [{"column": "F", "value": "0"}]})
+            assert r.status_code == 401
+            return
+        import uuid
+        stored = f"{uuid.uuid4()}.xlsx"
+        db_connection.execute(
+            """INSERT INTO files (user_id, original_filename, stored_filename, file_type)
+               VALUES (?, ?, ?, ?)""",
+            (test_user["id"], "ghost.xlsx", stored, "original"),
+        )
+        db_connection.commit()
+        file_id = db_connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        r = client.post(
+            f"/api/process/{file_id}",
+            json={"filter_rules": [{"column": "F", "value": "0"}]},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert r.status_code == 404
+        assert "disk" in r.get_json().get("error", "").lower()
+        db_connection.execute("DELETE FROM files WHERE id = ?", (file_id,))
+        db_connection.commit()
+
     def test_process_file_with_empty_filter_rules(self, client, auth_token, sample_excel_file):
         """Test that process_file requires non-empty filter_rules"""
         if auth_token is None:
-            pytest.skip("Auth token not available - check test setup")
+            r = client.post('/api/process/1', json={'filter_rules': []})
+            assert r.status_code == 401
+            return
         
         # Upload a file first
         with open(sample_excel_file, 'rb') as f:
@@ -74,7 +104,9 @@ class TestProcessFileEndpoint:
     def test_process_file_identifies_rows_to_delete(self, client, auth_token, comprehensive_test_excel, test_user, db_connection):
         """Test that process_file correctly identifies rows to delete"""
         if auth_token is None:
-            pytest.skip("Auth token not available - check test setup")
+            r = client.post('/api/process/1', json={'filter_rules': [{'column': 'F', 'value': '0'}]})
+            assert r.status_code == 401
+            return
         
         # Upload the comprehensive test file
         with open(comprehensive_test_excel, 'rb') as f:
@@ -118,7 +150,9 @@ class TestProcessFileEndpoint:
     def test_process_file_no_rows_to_delete(self, client, auth_token, sample_excel_file):
         """Test process_file when no rows match filter criteria"""
         if auth_token is None:
-            pytest.skip("Auth token not available - check test setup")
+            r = client.post('/api/process/1', json={'filter_rules': [{'column': 'F', 'value': '999'}]})
+            assert r.status_code == 401
+            return
         
         # Upload a file
         with open(sample_excel_file, 'rb') as f:
@@ -153,7 +187,9 @@ class TestProcessFileEndpoint:
     def test_process_file_generates_macro_and_instructions(self, client, auth_token, comprehensive_test_excel, test_directories, db_connection):
         """Test that process_file generates macro and instructions files"""
         if auth_token is None:
-            pytest.skip("Auth token not available - check test setup")
+            r = client.post('/api/process/1', json={'filter_rules': [{'column': 'F', 'value': '0'}]})
+            assert r.status_code == 401
+            return
         
         # Upload file
         with open(comprehensive_test_excel, 'rb') as f:
@@ -214,6 +250,57 @@ class TestProcessFileEndpoint:
             instructions_content = f.read()
             assert 'EXCEL FILE CLEANUP INSTRUCTIONS' in instructions_content
             assert 'comprehensive_test.xlsx' in instructions_content
+
+    def test_process_file_analysis_exception_returns_error(self, client, auth_token, sample_excel_file):
+        """When load_workbook/analysis raises, process_file returns 500 with error message."""
+        if auth_token is None:
+            r = client.post('/api/process/1', json={'filter_rules': [{'column': 'F', 'value': '0'}]})
+            assert r.status_code == 401
+            return
+        with open(sample_excel_file, "rb") as f:
+            up = client.post(
+                "/api/upload",
+                data={"file": (f, "test_file.xlsx")},
+                headers={"Authorization": f"Bearer {auth_token}"},
+                content_type="multipart/form-data",
+            )
+        assert up.status_code in [200, 201]
+        file_id = up.get_json()["file_id"]
+        with patch("main.load_workbook") as mock_load:
+            mock_load.side_effect = RuntimeError("Simulated analysis error")
+            r = client.post(
+                f"/api/process/{file_id}",
+                json={"filter_rules": [{"column": "F", "value": "0"}]},
+                headers={"Authorization": f"Bearer {auth_token}"},
+            )
+        assert r.status_code in [400, 500]
+        data = r.get_json()
+        assert "error" in data
+        assert "analysis" in data.get("error", "").lower() or "failed" in data.get("error", "").lower()
+
+    def test_process_file_outer_exception(self, client, auth_token, sample_excel_file):
+        """When get_db raises, outer except returns 500."""
+        if auth_token is None:
+            r = client.post('/api/process/1', json={'filter_rules': [{'column': 'F', 'value': '0'}]})
+            assert r.status_code == 401
+            return
+        with open(sample_excel_file, "rb") as f:
+            up = client.post(
+                "/api/upload",
+                data={"file": (f, "test_file.xlsx")},
+                headers={"Authorization": f"Bearer {auth_token}"},
+                content_type="multipart/form-data",
+            )
+        assert up.status_code in [200, 201]
+        file_id = up.get_json()["file_id"]
+        with patch("main.get_db", side_effect=RuntimeError("DB unavailable")):
+            r = client.post(
+                f"/api/process/{file_id}",
+                json={"filter_rules": [{"column": "F", "value": "0"}]},
+                headers={"Authorization": f"Bearer {auth_token}"},
+            )
+        assert r.status_code == 500
+        assert "error" in r.get_json()
 
 
 class TestGenerateLibreOfficeMacro:

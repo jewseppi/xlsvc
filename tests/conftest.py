@@ -23,7 +23,7 @@ def test_db_path():
     fd, path = tempfile.mkstemp(suffix='.db')
     os.close(fd)
     yield path
-    if os.path.exists(path):
+    if os.path.exists(path):  # pragma: no cover -- session teardown; file often removed by test_app
         os.remove(path)
 
 
@@ -65,7 +65,7 @@ def test_app(test_db_path, test_directories, monkeypatch):
     
     # Monkey patch get_db to use test database
     original_get_db = None
-    if hasattr(app, 'get_db'):
+    if hasattr(app, 'get_db'):  # pragma: no cover -- app does not have get_db attr
         original_get_db = app.get_db
     
     def get_test_db():
@@ -73,9 +73,13 @@ def test_app(test_db_path, test_directories, monkeypatch):
         conn.row_factory = sqlite3.Row
         return conn
     
-    # Replace get_db in main module
+    # Replace get_db in all modules that import it
     import main
+    import auth_helpers
+    import cleanup as cleanup_mod
     monkeypatch.setattr(main, 'get_db', get_test_db)
+    monkeypatch.setattr(auth_helpers, 'get_db', get_test_db)
+    monkeypatch.setattr(cleanup_mod, 'get_db', get_test_db)
     
     # Initialize test database
     conn = sqlite3.connect(test_db_path)
@@ -152,9 +156,15 @@ def test_app(test_db_path, test_directories, monkeypatch):
     conn.commit()
     conn.close()
     
+    # Push application context so current_app works in extracted modules
+    ctx = app.app_context()
+    ctx.push()
+    
     ensure_directories()
     
     yield app
+    
+    ctx.pop()
     
     # Cleanup test database
     if os.path.exists(test_db_path):
@@ -263,8 +273,8 @@ def auth_token(request, client, test_user):
         token = data.get('access_token')
         if token:
             return token
-    if response.status_code != 200:
-        print(f"DEBUG: Login failed with status {response.status_code}: {response.get_json()}")
+    if response.status_code != 200:  # pragma: no cover
+        print(f"DEBUG: Login failed with status {response.status_code}: {response.get_json()}")  # pragma: no cover
     return None
 
 

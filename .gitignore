@@ -1,9 +1,6 @@
 # Local SQLite DB
 xlsvc.db
 
-# Local docs (API, refactoring) – remove from gitignore to track
-docs/
-
 # macOS
 .DS_Store
 
@@ -14,3 +11,15 @@ macros/
 __pycache__/
 *.db
 venv/
+.venv/
+
+# Test / coverage artifacts
+.coverage
+htmlcov/
+coverage.xml
+test-report.html
+test-report.json
+test-results.xml
+
+# IDE
+.cursor/

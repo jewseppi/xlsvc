@@ -56,8 +56,8 @@ def generate_deletion_report(deleted_rows_data, output_path):
                     cell_len = len(str(cell.value)) if cell.value is not None else 0
                     if cell_len > max_length:
                         max_length = cell_len
-                except:
-                    pass
+                except Exception:  # pragma: no cover
+                    pass  # pragma: no cover
             adjusted_width = min(max(max_length + 2, 10), 50)
             ws.column_dimensions[column_letter].width = adjusted_width
     

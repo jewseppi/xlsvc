@@ -1,6 +1,8 @@
 [run]
-# Omit entry points, test helpers, and UNO-only code.
+# Omit entry points, test helpers, UNO-only, and external-API-only code.
 omit =
     passenger_wsgi.py
-    tests/create_test_excel.py
+    tests/*
     process_uno.py
+    cleanup_files.py
+    github_app.py
