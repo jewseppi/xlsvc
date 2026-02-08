@@ -78,17 +78,16 @@ All five extraction candidates from Section 4 have been extracted:
 
 | Module | Status | Coverage |
 |--------|--------|----------|
-| `auth_helpers.py` | Extracted | 88% |
-| `file_utils.py` | Extracted | 95% |
-| `db.py` | Extracted | 73% |
+| `auth_helpers.py` | Extracted | 100% |
+| `file_utils.py` | Extracted | 100% |
+| `db.py` | Extracted | 100% |
 | `processing_helpers.py` | Extracted (already existed) | 100% |
-| `cleanup.py` | Extracted | 52% |
+| `cleanup.py` | Extracted | 100% |
 | `macro_generator.py` | Extracted (bonus) | 100% |
+| `deletion_report.py` | Already existed | 100% |
 | `github_app.py` | Extracted (bonus, omitted from coverage — requires GitHub App credentials) | N/A |
 
-`main.py` now imports from all extracted modules. All 172 tests pass. Overall coverage: 91% (up from 68%).
-
-**Next:** Raise coverage toward 100% on the extracted modules (especially `cleanup.py` and `db.py`).
+`main.py` now imports from all extracted modules. 340 tests pass, 0 skipped. Overall coverage: **100%** (1,334 statements). `--cov-fail-under=100` enforced in `pytest.ini` and CI.
 
 **Optional: API cleanup**
 
