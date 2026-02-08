@@ -104,20 +104,29 @@ def generate_instructions(original_filename, total_rows, sheet_names, filter_rul
     """Generate step-by-step instructions for using the macro"""
     
     # Build filter description
+    bullet = "\u2022"
+    arrow = "\u2192"
+    nl = chr(10)
     filter_desc = "These rows match ALL of the following conditions:\n"
     for rule in filter_rules:
         if rule['value'] == '0':
-            filter_desc += f"  \u2022 Column {rule['column']} is empty or zero\n"
+            filter_desc += f"  {bullet} Column {rule['column']} is empty or zero\n"
         else:
-            filter_desc += f"  \u2022 Column {rule['column']} equals '{rule['value']}'\n"
-    
+            filter_desc += f"  {bullet} Column {rule['column']} equals '{rule['value']}'\n"
+
+    sheet_list = nl.join(bullet + " " + sheet for sheet in sheet_names)
+    sheet_breakdown = nl.join(
+        bullet + " " + sheet + ": rows to review and potentially delete"
+        for sheet in sheet_names
+    )
+
     return f"""EXCEL FILE CLEANUP INSTRUCTIONS
 Generated for: {original_filename}
 Generated on: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC
 
 === SUMMARY ===
 Analysis found {total_rows} rows to be deleted across {len(sheet_names)} sheet(s):
-{chr(10).join("\u2022 " + sheet for sheet in sheet_names)}
+{sheet_list}
 
 {filter_desc}
 
@@ -135,15 +144,15 @@ Analysis found {total_rows} rows to be deleted across {len(sheet_names)} sheet(s
    - Open your Excel file in LibreOffice Calc
 
 4. Import and run the macro:
-   - Go to Tools \u2192 Macros \u2192 Organize Macros \u2192 LibreOffice Basic
+   - Go to Tools {arrow} Macros {arrow} Organize Macros {arrow} LibreOffice Basic
    - Click "New" to create a new module
    - Delete the default code and paste the macro content
    - Click "Run" (or press F5)
    - The macro will show progress and completion message
 
 5. Save your file:
-   - File \u2192 Save (keeps Excel format)
-   - Or File \u2192 Save As to choose a different name/format
+   - File {arrow} Save (keeps Excel format)
+   - Or File {arrow} Save As to choose a different name/format
 
 === METHOD 2: MANUAL DELETION ===
 
@@ -153,7 +162,7 @@ If you prefer to delete rows manually, here's what to look for:
 - Work from bottom to top to avoid row number changes
 
 Sheet-by-sheet breakdown:
-{chr(10).join("\u2022 " + sheet + ": rows to review and potentially delete" for sheet in sheet_names)}
+{sheet_breakdown}
 
 === IMPORTANT NOTES ===
 - This process will preserve all images, charts, and formatting
