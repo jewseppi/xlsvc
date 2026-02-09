@@ -109,10 +109,7 @@ def generate_instructions(original_filename, total_rows, sheet_names, filter_rul
     nl = chr(10)
     filter_desc = "These rows match ALL of the following conditions:\n"
     for rule in filter_rules:
-        if rule['value'] == '0':
-            filter_desc += f"  {bullet} Column {rule['column']} is empty or zero\n"
-        else:
-            filter_desc += f"  {bullet} Column {rule['column']} equals '{rule['value']}'\n"
+        filter_desc += f"  {bullet} Column {rule['column']} is empty or zero\n"
 
     sheet_list = nl.join(bullet + " " + sheet for sheet in sheet_names)
     sheet_breakdown = nl.join(

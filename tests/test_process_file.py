@@ -150,10 +150,10 @@ class TestProcessFileEndpoint:
     def test_process_file_no_rows_to_delete(self, client, auth_token, sample_excel_file):
         """Test process_file when no rows match filter criteria"""
         if auth_token is None:
-            r = client.post('/api/process/1', json={'filter_rules': [{'column': 'F', 'value': '999'}]})
+            r = client.post('/api/process/1', json={'filter_rules': [{'column': 'A', 'value': '0'}]})
             assert r.status_code == 401
             return
-        
+
         # Upload a file
         with open(sample_excel_file, 'rb') as f:
             upload_response = client.post(
@@ -162,23 +162,23 @@ class TestProcessFileEndpoint:
                 headers={'Authorization': f'Bearer {auth_token}'},
                 content_type='multipart/form-data'
             )
-        
+
         # Upload returns 201 for new files, 200 for duplicates
         assert upload_response.status_code in [200, 201], f"Upload failed: {upload_response.get_json()}"
         file_id = upload_response.get_json()['file_id']
-        
-        # Process with filter rules that won't match (all columns = 999)
+
+        # Process with filter on column A which has non-empty strings ('Name', 'Row1', etc.)
+        # Since is_empty_or_zero is always used, Column A values are never empty/zero → no matches
         filter_rules = [
-            {'column': 'F', 'value': '999'},
-            {'column': 'G', 'value': '999'}
+            {'column': 'A', 'value': '0'}
         ]
-        
+
         response = client.post(
             f'/api/process/{file_id}',
             json={'filter_rules': filter_rules},
             headers={'Authorization': f'Bearer {auth_token}'}
         )
-        
+
         assert response.status_code == 200
         data = response.get_json()
         assert data['total_rows_to_delete'] == 0
@@ -302,6 +302,115 @@ class TestProcessFileEndpoint:
         assert r.status_code == 500
         assert "error" in r.get_json()
 
+    def test_process_file_skips_empty_column_a_rows(self, client, auth_token, test_user, test_directories, db_connection):
+        """Test that rows with empty Column A are skipped and NOT marked for deletion (UNO parity)"""
+        if auth_token is None:
+            r = client.post('/api/process/1', json={'filter_rules': [{'column': 'F', 'value': '0'}]})
+            assert r.status_code == 401
+            return
+
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'TestSheet'
+        # Header row (Column A has content)
+        ws.append(['Name', 'B', 'C', 'D', 'E', 'F'])
+        # Row 2: Column A has value, F=0 → SHOULD be marked for deletion
+        ws.append(['DataRow', '', '', '', '', 0])
+        # Row 3: Column A is EMPTY, F=0 → should be SKIPPED (not marked)
+        ws.append([None, '', '', '', '', 0])
+        # Row 4: Column A is blank string, F=0 → should be SKIPPED
+        ws.append(['', '', '', '', '', 0])
+        # Row 5: Column A has value, F=5 → should NOT match (F is not empty/zero)
+        ws.append(['AnotherRow', '', '', '', '', 5])
+
+        file_path = os.path.join(test_directories['uploads'], 'col_a_test.xlsx')
+        wb.save(file_path)
+
+        headers = {'Authorization': f'Bearer {auth_token}'}
+        with open(file_path, 'rb') as f:
+            up = client.post(
+                '/api/upload',
+                data={'file': (f, 'col_a_test.xlsx')},
+                headers=headers,
+                content_type='multipart/form-data',
+            )
+        assert up.status_code in [200, 201]
+        file_id = up.get_json()['file_id']
+
+        response = client.post(
+            f'/api/process/{file_id}',
+            json={'filter_rules': [{'column': 'F', 'value': '0'}]},
+            headers=headers,
+        )
+        assert response.status_code == 200
+        data = response.get_json()
+
+        # Only row 2 should be marked (Column A has content AND F=0)
+        # Rows 3 & 4 are skipped (empty Column A)
+        # Row 5 is not marked (F=5, not empty/zero)
+        # Row 1 (header) has "Name" in A and "F" in F — "F" is not empty/zero, so not marked
+        assert data['total_rows_to_delete'] == 1
+
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+    def test_process_file_generates_deletion_report(self, client, auth_token, comprehensive_test_excel, test_directories, db_connection):
+        """Test that process_file generates a deletion report and returns report_file_id (UNO parity)"""
+        if auth_token is None:
+            r = client.post('/api/process/1', json={'filter_rules': [{'column': 'F', 'value': '0'}]})
+            assert r.status_code == 401
+            return
+
+        with open(comprehensive_test_excel, 'rb') as f:
+            upload_response = client.post(
+                '/api/upload',
+                data={'file': (f, 'comprehensive_test.xlsx')},
+                headers={'Authorization': f'Bearer {auth_token}'},
+                content_type='multipart/form-data'
+            )
+        assert upload_response.status_code in [200, 201]
+        file_id = upload_response.get_json()['file_id']
+
+        filter_rules = [
+            {'column': 'F', 'value': '0'},
+            {'column': 'G', 'value': '0'},
+            {'column': 'H', 'value': '0'},
+            {'column': 'I', 'value': '0'}
+        ]
+
+        response = client.post(
+            f'/api/process/{file_id}',
+            json={'filter_rules': filter_rules},
+            headers={'Authorization': f'Bearer {auth_token}'}
+        )
+        assert response.status_code == 200
+        data = response.get_json()
+
+        # Must have rows to delete for report to be generated
+        assert data['total_rows_to_delete'] > 0
+
+        # Verify report_file_id is in response
+        assert 'report_file_id' in data
+        assert data['report_file_id'] is not None
+
+        # Verify report is in downloads
+        assert 'report' in data['downloads']
+        assert 'file_id' in data['downloads']['report']
+        assert data['downloads']['report']['file_id'] == data['report_file_id']
+
+        # Verify DB record exists with correct file_type
+        report_record = db_connection.execute(
+            'SELECT file_type, stored_filename FROM files WHERE id = ?',
+            (data['report_file_id'],)
+        ).fetchone()
+        assert report_record is not None
+        assert report_record['file_type'] == 'report'
+
+        # Verify file exists on disk
+        report_path = os.path.join(test_directories['reports'], report_record['stored_filename'])
+        assert os.path.exists(report_path), f"Report file not found: {report_path}"
+
 
 class TestGenerateLibreOfficeMacro:
     """Tests for generate_libreoffice_macro function"""
@@ -408,16 +517,17 @@ class TestGenerateInstructions:
         assert 'Column G' in instructions
     
     def test_generate_instructions_with_exact_value_filter(self):
-        """Test instructions with exact value filter (not zero)"""
+        """Test instructions always show empty/zero description regardless of value"""
         instructions = generate_instructions(
             'test.xlsx',
             3,
             ['Sheet1'],
             [{'column': 'A', 'value': 'DELETE'}]
         )
-        
-        assert "Column A equals 'DELETE'" in instructions
-        assert 'empty or zero' not in instructions or instructions.count('empty or zero') == 1  # Only for zero filters
+
+        # After parity change, all rules show "empty or zero"
+        assert 'Column A is empty or zero' in instructions
+        assert "equals 'DELETE'" not in instructions
 
 
 class TestProcessingLogic:
@@ -460,32 +570,38 @@ class TestProcessingLogic:
         assert 5 not in rows_to_delete  # Has values
         assert 9 not in rows_to_delete  # Partial match
     
-    def test_row_identification_with_exact_value(self, comprehensive_test_excel):
-        """Test that rows with exact values are correctly identified"""
+    def test_row_identification_always_uses_empty_or_zero(self, comprehensive_test_excel):
+        """Test that filter rules always check for empty/zero regardless of value field"""
         from openpyxl import load_workbook
-        from main import column_to_index
-        
+        from main import column_to_index, is_empty_or_zero
+
         wb = load_workbook(comprehensive_test_excel, data_only=True)
         sheet = wb['TestSheet1']
-        
+
+        # Even with value='Row5_HasValues', the evaluation should check empty/zero
         filter_rules = [
             {'column': 'A', 'value': 'Row5_HasValues'}
         ]
-        
+
         rows_to_delete = []
         for row_num in range(2, sheet.max_row + 1):
+            # Column A pre-filter
+            col_a_value = sheet.cell(row=row_num, column=1).value
+            if col_a_value is None or str(col_a_value).strip() == '':
+                continue
+
             all_match = True
             for rule in filter_rules:
                 col_index = column_to_index(rule['column'])
                 cell_val = sheet.cell(row=row_num, column=col_index).value
-                
-                if cell_val != rule['value']:
+
+                if not is_empty_or_zero(cell_val):
                     all_match = False
                     break
-            
+
             if all_match:
                 rows_to_delete.append(row_num)
-        
-        # Should only find row 5
-        assert len(rows_to_delete) == 1
-        assert 5 in rows_to_delete
+
+        # Column A has non-empty values for data rows, so NO rows should match
+        # (because is_empty_or_zero returns False for non-empty strings)
+        assert len(rows_to_delete) == 0

@@ -364,6 +364,11 @@ def process_file(file_id):
                 max_row = sheet.max_row
                 
                 for row_num in range(1, max_row + 1):
+                    # Column A pre-filter: skip rows where column A is empty (parity with UNO)
+                    col_a_value = sheet.cell(row=row_num, column=1).value
+                    if col_a_value is None or str(col_a_value).strip() == '':
+                        continue
+
                     # Check columns dynamically based on filter_rules
                     all_match = True
                     
@@ -373,14 +378,10 @@ def process_file(file_id):
                         col_index = column_to_index(column)
                         cell_val = sheet.cell(row=row_num, column=col_index).value
                         
-                        if expected_value == '0':
-                            if not is_empty_or_zero(cell_val):
-                                all_match = False
-                                break
-                        else:
-                            if cell_val != expected_value:
-                                all_match = False
-                                break
+                        # Always check for empty/zero (parity with UNO behavior)
+                        if not is_empty_or_zero(cell_val):
+                            all_match = False
+                            break
                     
                     if all_match:
                         rows_to_delete.append(row_num)
@@ -450,33 +451,55 @@ def process_file(file_id):
             ).lastrowid
             
             instructions_file_id = conn.execute(
-                '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type) 
+                '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type)
                    VALUES (?, ?, ?, ?, ?, ?)''',
-                (file_dict['user_id'], f"Instructions_{file_dict['original_filename']}.txt", 
+                (file_dict['user_id'], f"Instructions_{file_dict['original_filename']}.txt",
                  instructions_filename, os.path.getsize(instructions_path), True, 'instructions')
             ).lastrowid
-            
+
+            # Generate deletion report (parity with UNO automated path)
+            report_file_id = None
+            if deleted_rows_data:
+                report_stored_filename = f"deletion_report_{uuid.uuid4().hex[:8]}.xlsx"
+                report_path = os.path.join(app.config['REPORTS_FOLDER'], report_stored_filename)
+                report_result = generate_deletion_report(deleted_rows_data, report_path)
+                if report_result:
+                    report_file_id = conn.execute(
+                        '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                        (file_dict['user_id'], f"DeletionReport_{file_dict['original_filename']}.xlsx",
+                         report_stored_filename, os.path.getsize(report_path), True, 'report', file_id)
+                    ).lastrowid
+
             conn.execute('UPDATE files SET processed = TRUE WHERE id = ?', (file_id,))
             conn.commit()
             conn.close()
             
             processing_log.append("Analysis complete - all files generated")
             
+            downloads = {
+                'macro': {
+                    'file_id': macro_file_id,
+                    'filename': f"Macro_{file_dict['original_filename']}.bas"
+                },
+                'instructions': {
+                    'file_id': instructions_file_id,
+                    'filename': f"Instructions_{file_dict['original_filename']}.txt"
+                }
+            }
+            if report_file_id:
+                downloads['report'] = {
+                    'file_id': report_file_id,
+                    'filename': f"DeletionReport_{file_dict['original_filename']}.xlsx"
+                }
+
             return jsonify({
                 'message': 'Analysis complete',
                 'total_rows_to_delete': total_rows_to_delete,
                 'sheets_affected': list(rows_to_delete_by_sheet.keys()),
                 'processing_log': processing_log,
-                'downloads': {
-                    'macro': {
-                        'file_id': macro_file_id,
-                        'filename': f"Macro_{file_dict['original_filename']}.bas"
-                    },
-                    'instructions': {
-                        'file_id': instructions_file_id,
-                        'filename': f"Instructions_{file_dict['original_filename']}.txt"
-                    }
-                }
+                'report_file_id': report_file_id,
+                'downloads': downloads
             }), 200
             
         except Exception as processing_error:
