@@ -56,7 +56,7 @@ def get_file_path(file_type, filename):
         return os.path.join(processed, filename)
     elif file_type in ['macro', 'instructions']:
         return os.path.join(macros, filename)
-    elif file_type == 'report':
+    elif file_type in ['report', 'macro_report']:
         return os.path.join(reports, filename)
     else:
         return os.path.join(upload, filename)

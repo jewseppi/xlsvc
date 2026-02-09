@@ -350,6 +350,23 @@ class TestCleanupFilesRoute:
         assert db_connection.execute("SELECT id FROM files WHERE id = ?", (file_id,)).fetchone() is None
         db_connection.commit()
 
+    def test_cleanup_files_removes_missing_macro_report_file(self, client, auth_token, test_user, db_connection, test_app):
+        """cleanup-files removes DB record when macro_report file is missing on disk."""
+        if auth_token is None:
+            assert client.post("/api/cleanup-files").status_code == 401
+            return
+        db_connection.execute(
+            """INSERT INTO files (user_id, original_filename, stored_filename, file_type)
+               VALUES (?, ?, ?, ?)""",
+            (test_user["id"], "ghost_macro_report.xlsx", "nonexistent_macro_report.xlsx", "macro_report"),
+        )
+        db_connection.commit()
+        file_id = db_connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        r = client.post("/api/cleanup-files", headers={"Authorization": f"Bearer {auth_token}"})
+        assert r.status_code == 200
+        assert db_connection.execute("SELECT id FROM files WHERE id = ?", (file_id,)).fetchone() is None
+        db_connection.commit()
+
     def test_cleanup_files_removes_missing_file_other_type(self, client, auth_token, test_user, db_connection, test_app):
         """cleanup-files uses UPLOAD_FOLDER for unknown file_type (else branch)."""
         if auth_token is None:

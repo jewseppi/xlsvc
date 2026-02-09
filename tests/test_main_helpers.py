@@ -106,6 +106,11 @@ class TestGetFilePath:
         p = main.get_file_path("report", "r.xlsx")
         assert p == os.path.join(test_app.config["REPORTS_FOLDER"], "r.xlsx")
 
+    def test_get_file_path_macro_report(self, test_app):
+        """file_type 'macro_report' -> REPORTS_FOLDER."""
+        p = main.get_file_path("macro_report", "r.xlsx")
+        assert p == os.path.join(test_app.config["REPORTS_FOLDER"], "r.xlsx")
+
     def test_get_file_path_other_falls_back_to_upload(self, test_app):
         """Unknown file_type -> UPLOAD_FOLDER."""
         p = main.get_file_path("other", "x.xlsx")
