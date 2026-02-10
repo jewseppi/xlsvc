@@ -374,7 +374,6 @@ def process_file(file_id):
                     
                     for rule in filter_rules:
                         column = rule.get('column')
-                        expected_value = rule.get('value')
                         col_index = column_to_index(column)
                         cell_val = sheet.cell(row=row_num, column=col_index).value
                         
