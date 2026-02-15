@@ -149,6 +149,43 @@ def init_db():
     ''')
     print("✅ Created invitation_tokens table")
 
+    # Filter profiles table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS filter_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            filter_rules_json TEXT NOT NULL,
+            columns_to_remove TEXT DEFAULT '[]',
+            is_system_template BOOLEAN DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+    print("✅ Created filter_profiles table")
+
+    # Seed default "Silver" system template if no system templates exist
+    existing_templates = cursor.execute(
+        'SELECT id FROM filter_profiles WHERE is_system_template = 1'
+    ).fetchone()
+    if not existing_templates:
+        import json
+        default_rules = json.dumps([
+            {"column": "F", "value": "0"},
+            {"column": "G", "value": "0"},
+            {"column": "H", "value": "0"},
+            {"column": "I", "value": "0"}
+        ])
+        cursor.execute(
+            '''INSERT INTO filter_profiles
+               (user_id, name, description, filter_rules_json, columns_to_remove, is_system_template)
+               VALUES (NULL, ?, ?, ?, '[]', 1)''',
+            ('Silver', 'Default filter profile: checks columns F, G, H, I for empty/zero values', default_rules)
+        )
+        print("✅ Seeded 'Silver' system template")
+
     conn.commit()
     conn.close()
 

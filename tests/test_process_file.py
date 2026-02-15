@@ -148,7 +148,11 @@ class TestProcessFileEndpoint:
         assert 'instructions' in data['downloads']
     
     def test_process_file_no_rows_to_delete(self, client, auth_token, sample_excel_file):
-        """Test process_file when no rows match filter criteria"""
+        """Test process_file when no rows match filter criteria.
+        
+        All rules use is_empty_or_zero, so we filter on Column A which
+        contains non-empty text in every data row -> no matches.
+        """
         if auth_token is None:
             r = client.post('/api/process/1', json={'filter_rules': [{'column': 'A', 'value': '0'}]})
             assert r.status_code == 401
@@ -166,9 +170,8 @@ class TestProcessFileEndpoint:
         # Upload returns 201 for new files, 200 for duplicates
         assert upload_response.status_code in [200, 201], f"Upload failed: {upload_response.get_json()}"
         file_id = upload_response.get_json()['file_id']
-
-        # Process with filter on column A which has non-empty strings ('Name', 'Row1', etc.)
-        # Since is_empty_or_zero is always used, Column A values are never empty/zero → no matches
+        
+        # Process with filter on Column A (has text in every row -> never empty/zero)
         filter_rules = [
             {'column': 'A', 'value': '0'}
         ]
@@ -516,18 +519,18 @@ class TestGenerateInstructions:
         assert 'Column F' in instructions
         assert 'Column G' in instructions
     
-    def test_generate_instructions_with_exact_value_filter(self):
-        """Test instructions always show empty/zero description regardless of value"""
+    def test_generate_instructions_all_rules_empty_or_zero(self):
+        """All rules are described as empty/zero checks (parity with UNO)."""
         instructions = generate_instructions(
             'test.xlsx',
             3,
             ['Sheet1'],
-            [{'column': 'A', 'value': 'DELETE'}]
+            [{'column': 'A', 'value': 'DELETE'}, {'column': 'B', 'value': '0'}]
         )
-
-        # After parity change, all rules show "empty or zero"
-        assert 'Column A is empty or zero' in instructions
-        assert "equals 'DELETE'" not in instructions
+        
+        # Both rules should say "empty or zero" regardless of the value field
+        assert instructions.count('is empty or zero') == 2
+        assert "equals" not in instructions
 
 
 class TestProcessingLogic:
@@ -605,3 +608,408 @@ class TestProcessingLogic:
         # Column A has non-empty values for data rows, so NO rows should match
         # (because is_empty_or_zero returns False for non-empty strings)
         assert len(rows_to_delete) == 0
+
+
+class TestColumnAPreFilter:
+    """Tests for Column A pre-filter behavior (parity with UNO)."""
+
+    def test_rows_with_empty_col_a_are_skipped(self, client, test_user, test_directories, db_connection):
+        """Rows where Column A is empty are NOT evaluated for deletion."""
+        from openpyxl import Workbook
+
+        # Create a workbook where some rows have empty column A
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws['A1'] = 'Header'
+        ws['F1'] = 'ColF'
+        # Row 2: Col A has data, F is zero → should be deleted
+        ws['A2'] = 'DataRow'
+        ws['F2'] = 0
+        # Row 3: Col A is empty, F is zero → should be SKIPPED (not deleted)
+        ws['A3'] = None
+        ws['F3'] = 0
+        # Row 4: Col A has whitespace only, F is zero → should be SKIPPED
+        ws['A4'] = '   '
+        ws['F4'] = 0
+        # Row 5: Col A = 0 (numeric zero), F is zero → Column A is "0" which is truthy
+        ws['A5'] = 0
+        ws['F5'] = 0
+
+        file_path = os.path.join(test_directories['uploads'], 'col_a_test.xlsx')
+        wb.save(file_path)
+
+        login = client.post('/api/login', json={
+            'email': test_user['email'], 'password': test_user['password']
+        })
+        token = login.get_json()['access_token']
+
+        with open(file_path, 'rb') as f:
+            upload = client.post('/api/upload',
+                                  data={'file': (f, 'col_a_test.xlsx')},
+                                  headers={'Authorization': f'Bearer {token}'},
+                                  content_type='multipart/form-data')
+        assert upload.status_code in [200, 201]
+        file_id = upload.get_json()['file_id']
+
+        response = client.post(f'/api/process/{file_id}', json={
+            'filter_rules': [{'column': 'F', 'value': '0'}]
+        }, headers={'Authorization': f'Bearer {token}'})
+
+        assert response.status_code == 200
+        data = response.get_json()
+        # Row 1 (Header) has non-zero F, Row 3 and 4 skipped (empty A),
+        # Row 2 and 5 should be deleted (A has data, F is zero)
+        assert data['total_rows_to_delete'] == 2
+
+        # Cleanup
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+
+class TestColumnsToRemoveValidation:
+    """Tests for columns_to_remove parameter in process_file."""
+
+    def test_invalid_columns_to_remove_returns_400(self, client, test_user, sample_excel_file):
+        """Invalid columns_to_remove returns 400."""
+        login = client.post('/api/login', json={
+            'email': test_user['email'], 'password': test_user['password']
+        })
+        token = login.get_json()['access_token']
+
+        with open(sample_excel_file, 'rb') as f:
+            upload = client.post('/api/upload',
+                                  data={'file': (f, 'test_file.xlsx')},
+                                  headers={'Authorization': f'Bearer {token}'},
+                                  content_type='multipart/form-data')
+        assert upload.status_code in [200, 201]
+        file_id = upload.get_json()['file_id']
+
+        response = client.post(f'/api/process/{file_id}', json={
+            'filter_rules': [{'column': 'F', 'value': '0'}],
+            'columns_to_remove': ['123']  # invalid
+        }, headers={'Authorization': f'Bearer {token}'})
+
+        assert response.status_code == 400
+        assert 'columns_to_remove' in response.get_json()['error']
+
+    def test_valid_columns_to_remove_accepted(self, client, test_user, sample_excel_file):
+        """Valid columns_to_remove is accepted and processed."""
+        login = client.post('/api/login', json={
+            'email': test_user['email'], 'password': test_user['password']
+        })
+        token = login.get_json()['access_token']
+
+        with open(sample_excel_file, 'rb') as f:
+            upload = client.post('/api/upload',
+                                  data={'file': (f, 'test_file.xlsx')},
+                                  headers={'Authorization': f'Bearer {token}'},
+                                  content_type='multipart/form-data')
+        assert upload.status_code in [200, 201]
+        file_id = upload.get_json()['file_id']
+
+        response = client.post(f'/api/process/{file_id}', json={
+            'filter_rules': [{'column': 'F', 'value': '0'}],
+            'columns_to_remove': ['B', 'c']  # will be normalized to uppercase
+        }, headers={'Authorization': f'Bearer {token}'})
+
+        # Should succeed (rows are evaluated)
+        assert response.status_code == 200
+
+
+class TestDeletionReportGeneration:
+    """Tests for deletion report generation in manual path."""
+
+    def test_process_file_generates_deletion_report(self, client, test_user, comprehensive_test_excel, test_directories, db_connection):
+        """Manual process_file generates deletion report and returns report_file_id."""
+        login = client.post('/api/login', json={
+            'email': test_user['email'], 'password': test_user['password']
+        })
+        token = login.get_json()['access_token']
+
+        with open(comprehensive_test_excel, 'rb') as f:
+            upload = client.post('/api/upload',
+                                  data={'file': (f, 'comprehensive_test.xlsx')},
+                                  headers={'Authorization': f'Bearer {token}'},
+                                  content_type='multipart/form-data')
+        assert upload.status_code in [200, 201]
+        file_id = upload.get_json()['file_id']
+
+        response = client.post(f'/api/process/{file_id}', json={
+            'filter_rules': [
+                {'column': 'G', 'value': '0'},
+                {'column': 'H', 'value': '0'},
+                {'column': 'I', 'value': '0'},
+                {'column': 'F', 'value': '0'}
+            ]
+        }, headers={'Authorization': f'Bearer {token}'})
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data['total_rows_to_delete'] > 0
+        # Deletion report should be generated and report_file_id returned
+        assert 'report_file_id' in data
+        assert isinstance(data['report_file_id'], int)
+
+        # Verify the report file exists in DB
+        report_record = db_connection.execute(
+            "SELECT * FROM files WHERE id = ?", (data['report_file_id'],)
+        ).fetchone()
+        assert report_record is not None
+        assert report_record['file_type'] == 'report'
+        assert 'DeletionReport' in report_record['original_filename']
+
+        # Verify the report file exists on disk
+        report_path = os.path.join(test_directories['reports'], report_record['stored_filename'])
+        assert os.path.exists(report_path)
+
+
+class TestInstructionsWithColumnsToRemove:
+    """Tests for generate_instructions with columns_to_remove."""
+
+    def test_instructions_include_column_removal_info(self):
+        """Instructions mention columns to be removed when provided."""
+        instructions = generate_instructions(
+            'test.xlsx', 5, ['Sheet1'],
+            [{'column': 'F', 'value': '0'}],
+            columns_to_remove=['B', 'D']
+        )
+        assert 'Column B' in instructions
+        assert 'Column D' in instructions
+        assert 'right-to-left' in instructions
+
+    def test_instructions_no_column_removal_when_empty(self):
+        """Instructions don't mention column removal when list is empty."""
+        instructions = generate_instructions(
+            'test.xlsx', 5, ['Sheet1'],
+            [{'column': 'F', 'value': '0'}],
+            columns_to_remove=[]
+        )
+        assert 'Columns to be removed' not in instructions
+
+    def test_instructions_dynamic_manual_columns(self):
+        """Manual deletion section uses actual rule columns, not hardcoded F,G,H,I."""
+        instructions = generate_instructions(
+            'test.xlsx', 5, ['Sheet1'],
+            [{'column': 'X', 'value': '0'}, {'column': 'Y', 'value': '0'}]
+        )
+        assert 'X, Y' in instructions
+        # Should NOT contain the old hardcoded F, G, H, I reference
+        assert 'columns F, G, H, and I' not in instructions
+
+
+class TestProfileAwareProcessing:
+    """Tests for profile_id resolution in process_file and process-automated routes."""
+
+    def test_process_file_with_profile_id(self, client, test_user, sample_excel_file, db_connection):
+        """Process file using a saved profile (profile_id)."""
+        login = client.post('/api/login', json={
+            'email': test_user['email'], 'password': test_user['password']
+        })
+        token = login.get_json()['access_token']
+
+        # Create a profile
+        db_connection.execute(
+            """INSERT INTO filter_profiles
+               (id, user_id, name, filter_rules_json, columns_to_remove, is_system_template)
+               VALUES (100, ?, 'TestProfile', '[{"column":"F","value":"0"}]', '[]', 0)""",
+            (test_user['id'],)
+        )
+        db_connection.commit()
+
+        with open(sample_excel_file, 'rb') as f:
+            upload = client.post('/api/upload',
+                                  data={'file': (f, 'test_file.xlsx')},
+                                  headers={'Authorization': f'Bearer {token}'},
+                                  content_type='multipart/form-data')
+        assert upload.status_code in [200, 201]
+        file_id = upload.get_json()['file_id']
+
+        # Process with profile_id (no filter_rules in request)
+        response = client.post(f'/api/process/{file_id}', json={
+            'profile_id': 100
+        }, headers={'Authorization': f'Bearer {token}'})
+
+        assert response.status_code == 200
+        data = response.get_json()
+        # Profile has filter for column F = 0, sample has zeros in F → should find rows
+        assert data['total_rows_to_delete'] > 0
+
+        # Cleanup
+        db_connection.execute("DELETE FROM filter_profiles WHERE id = 100")
+        db_connection.commit()
+
+    def test_process_file_with_system_template(self, client, test_user, sample_excel_file, db_connection):
+        """Process file using a system template profile."""
+        login = client.post('/api/login', json={
+            'email': test_user['email'], 'password': test_user['password']
+        })
+        token = login.get_json()['access_token']
+
+        db_connection.execute(
+            """INSERT INTO filter_profiles
+               (id, user_id, name, filter_rules_json, columns_to_remove, is_system_template)
+               VALUES (101, NULL, 'SystemTmpl', '[{"column":"F","value":"0"}]', '[]', 1)"""
+        )
+        db_connection.commit()
+
+        with open(sample_excel_file, 'rb') as f:
+            upload = client.post('/api/upload',
+                                  data={'file': (f, 'test_file.xlsx')},
+                                  headers={'Authorization': f'Bearer {token}'},
+                                  content_type='multipart/form-data')
+        assert upload.status_code in [200, 201]
+        file_id = upload.get_json()['file_id']
+
+        response = client.post(f'/api/process/{file_id}', json={
+            'profile_id': 101
+        }, headers={'Authorization': f'Bearer {token}'})
+        assert response.status_code == 200
+
+        # Cleanup
+        db_connection.execute("DELETE FROM filter_profiles WHERE id = 101")
+        db_connection.commit()
+
+    def test_process_file_profile_not_found(self, client, test_user, sample_excel_file):
+        """Profile not found returns 404."""
+        login = client.post('/api/login', json={
+            'email': test_user['email'], 'password': test_user['password']
+        })
+        token = login.get_json()['access_token']
+
+        with open(sample_excel_file, 'rb') as f:
+            upload = client.post('/api/upload',
+                                  data={'file': (f, 'test_file.xlsx')},
+                                  headers={'Authorization': f'Bearer {token}'},
+                                  content_type='multipart/form-data')
+        assert upload.status_code in [200, 201]
+        file_id = upload.get_json()['file_id']
+
+        response = client.post(f'/api/process/{file_id}', json={
+            'profile_id': 99999
+        }, headers={'Authorization': f'Bearer {token}'})
+        assert response.status_code == 404
+
+    def test_process_file_profile_access_denied(self, client, test_user, sample_excel_file, db_connection):
+        """Cannot use another user's profile."""
+        login = client.post('/api/login', json={
+            'email': test_user['email'], 'password': test_user['password']
+        })
+        token = login.get_json()['access_token']
+
+        # Create profile for a different user (id=99999)
+        db_connection.execute(
+            """INSERT INTO filter_profiles
+               (id, user_id, name, filter_rules_json, is_system_template)
+               VALUES (102, 99999, 'OtherUser', '[{"column":"F","value":"0"}]', 0)"""
+        )
+        db_connection.commit()
+
+        with open(sample_excel_file, 'rb') as f:
+            upload = client.post('/api/upload',
+                                  data={'file': (f, 'test_file.xlsx')},
+                                  headers={'Authorization': f'Bearer {token}'},
+                                  content_type='multipart/form-data')
+        assert upload.status_code in [200, 201]
+        file_id = upload.get_json()['file_id']
+
+        response = client.post(f'/api/process/{file_id}', json={
+            'profile_id': 102
+        }, headers={'Authorization': f'Bearer {token}'})
+        assert response.status_code == 403
+
+        # Cleanup
+        db_connection.execute("DELETE FROM filter_profiles WHERE id = 102")
+        db_connection.commit()
+
+    def test_inline_rules_take_precedence_over_profile_id(self, client, test_user, sample_excel_file, db_connection):
+        """When both profile_id and filter_rules are provided, filter_rules take precedence."""
+        login = client.post('/api/login', json={
+            'email': test_user['email'], 'password': test_user['password']
+        })
+        token = login.get_json()['access_token']
+
+        db_connection.execute(
+            """INSERT INTO filter_profiles
+               (id, user_id, name, filter_rules_json, is_system_template)
+               VALUES (103, ?, 'Unused', '[{"column":"A","value":"0"}]', 0)""",
+            (test_user['id'],)
+        )
+        db_connection.commit()
+
+        with open(sample_excel_file, 'rb') as f:
+            upload = client.post('/api/upload',
+                                  data={'file': (f, 'test_file.xlsx')},
+                                  headers={'Authorization': f'Bearer {token}'},
+                                  content_type='multipart/form-data')
+        assert upload.status_code in [200, 201]
+        file_id = upload.get_json()['file_id']
+
+        # Send both profile_id and filter_rules — filter_rules should be used
+        response = client.post(f'/api/process/{file_id}', json={
+            'profile_id': 103,
+            'filter_rules': [{'column': 'F', 'value': '0'}]
+        }, headers={'Authorization': f'Bearer {token}'})
+        assert response.status_code == 200
+        data = response.get_json()
+        # Column F has zeros → rows found (inline rules used, not profile's column A)
+        assert data['total_rows_to_delete'] > 0
+
+        # Cleanup
+        db_connection.execute("DELETE FROM filter_profiles WHERE id = 103")
+        db_connection.commit()
+
+
+class TestAutomatedProfileResolution:
+    """Tests for profile_id resolution in process-automated route."""
+
+    def test_automated_profile_not_found(self, client, test_user, sample_excel_file):
+        """Profile not found in automated route returns 404."""
+        login = client.post('/api/login', json={
+            'email': test_user['email'], 'password': test_user['password']
+        })
+        token = login.get_json()['access_token']
+
+        with open(sample_excel_file, 'rb') as f:
+            upload = client.post('/api/upload',
+                                  data={'file': (f, 'test_file.xlsx')},
+                                  headers={'Authorization': f'Bearer {token}'},
+                                  content_type='multipart/form-data')
+        assert upload.status_code in [200, 201]
+        file_id = upload.get_json()['file_id']
+
+        response = client.post(f'/api/process-automated/{file_id}', json={
+            'profile_id': 99999
+        }, headers={'Authorization': f'Bearer {token}'})
+        assert response.status_code == 404
+
+    def test_automated_profile_access_denied(self, client, test_user, sample_excel_file, db_connection):
+        """Cannot use another user's profile in automated route."""
+        login = client.post('/api/login', json={
+            'email': test_user['email'], 'password': test_user['password']
+        })
+        token = login.get_json()['access_token']
+
+        db_connection.execute(
+            """INSERT INTO filter_profiles
+               (id, user_id, name, filter_rules_json, is_system_template)
+               VALUES (104, 99999, 'OtherUser', '[{"column":"F","value":"0"}]', 0)"""
+        )
+        db_connection.commit()
+
+        with open(sample_excel_file, 'rb') as f:
+            upload = client.post('/api/upload',
+                                  data={'file': (f, 'test_file.xlsx')},
+                                  headers={'Authorization': f'Bearer {token}'},
+                                  content_type='multipart/form-data')
+        assert upload.status_code in [200, 201]
+        file_id = upload.get_json()['file_id']
+
+        response = client.post(f'/api/process-automated/{file_id}', json={
+            'profile_id': 104
+        }, headers={'Authorization': f'Bearer {token}'})
+        assert response.status_code == 403
+
+        # Cleanup
+        db_connection.execute("DELETE FROM filter_profiles WHERE id = 104")
+        db_connection.commit()

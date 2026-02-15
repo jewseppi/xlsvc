@@ -312,6 +312,31 @@ def get_files():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+def _resolve_profile(data, user_id, conn):
+    """Resolve profile_id to filter_rules + columns_to_remove.
+    
+    Returns (filter_rules, columns_to_remove, error_response).
+    If error_response is not None, return it directly from the route.
+    """
+    profile_id = data.get('profile_id')
+    filter_rules = data.get('filter_rules', [])
+    columns_to_remove = data.get('columns_to_remove', [])
+
+    if profile_id and not filter_rules:
+        profile = conn.execute(
+            'SELECT * FROM filter_profiles WHERE id = ?', (profile_id,)
+        ).fetchone()
+        if not profile:
+            return None, None, (jsonify({'error': 'Profile not found'}), 404)
+        # Visibility check: must be owner or system template
+        if not profile['is_system_template'] and profile['user_id'] != user_id:
+            return None, None, (jsonify({'error': 'Access denied to this profile'}), 403)
+        filter_rules = json.loads(profile['filter_rules_json'])
+        columns_to_remove = json.loads(profile['columns_to_remove'])
+
+    return filter_rules, columns_to_remove, None
+
+
 @app.route('/api/process/<int:file_id>', methods=['POST'])
 @jwt_required()
 def process_file(file_id):
@@ -320,17 +345,36 @@ def process_file(file_id):
         
         # Get filter rules from request body
         data = request.get_json() or {}
-        filter_rules = data.get('filter_rules', [])
+        
+        # Get file info and verify ownership (needed for profile resolution)
+        conn = get_db()
+        user = conn.execute(
+            'SELECT id FROM users WHERE email = ?', (current_user_email,)
+        ).fetchone()
+        user_id = user['id'] if user else None
+        
+        # Resolve profile or use inline rules
+        filter_rules, columns_to_remove, err = _resolve_profile(data, user_id, conn)
+        if err:
+            conn.close()
+            return err
         
         if not filter_rules or len(filter_rules) == 0:
+            conn.close()
             return jsonify({
                 'error': 'filter_rules required and must be a non-empty array'
             }), 400
         
+        # Validate and normalize columns_to_remove
+        if columns_to_remove:
+            columns_to_remove = list(dict.fromkeys([c.upper() for c in columns_to_remove if isinstance(c, str)]))
+            if not _validate_columns_to_remove(columns_to_remove):
+                conn.close()
+                return jsonify({'error': 'columns_to_remove must be an array of uppercase column letters'}), 400
+        
         print(f"DEBUG: Manual processing with {len(filter_rules)} filter rules")
         
         # Get file info and verify ownership
-        conn = get_db()
         file_info = conn.execute(
             '''SELECT f.* FROM files f
                JOIN users u ON f.user_id = u.id
@@ -364,21 +408,21 @@ def process_file(file_id):
                 max_row = sheet.max_row
                 
                 for row_num in range(1, max_row + 1):
-                    # Column A pre-filter: skip rows where column A is empty (parity with UNO)
-                    col_a_value = sheet.cell(row=row_num, column=1).value
-                    if col_a_value is None or str(col_a_value).strip() == '':
+                    # Column A pre-filter: skip rows where Column A is empty (parity with UNO)
+                    col_a_val = sheet.cell(row=row_num, column=1).value
+                    col_a_str = str(col_a_val).strip() if col_a_val is not None else ''
+                    if not col_a_str:
                         continue
-
+                    
                     # Check columns dynamically based on filter_rules
                     all_match = True
                     
                     for rule in filter_rules:
                         column = rule.get('column')
-                        expected_value = rule.get('value')
                         col_index = column_to_index(column)
                         cell_val = sheet.cell(row=row_num, column=col_index).value
                         
-                        # Always check for empty/zero (parity with UNO behavior)
+                        # Always use is_empty_or_zero for rule matching (parity with UNO)
                         if not is_empty_or_zero(cell_val):
                             all_match = False
                             break
@@ -434,13 +478,28 @@ def process_file(file_id):
                 file_dict['original_filename'],
                 total_rows_to_delete,
                 list(rows_to_delete_by_sheet.keys()),
-                filter_rules
+                filter_rules,
+                columns_to_remove=columns_to_remove
             )
             
             instructions_filename = f"instructions_{uuid.uuid4().hex[:8]}.txt"
             instructions_path = os.path.join(app.config['MACROS_FOLDER'], instructions_filename)
             with open(instructions_path, 'w', encoding='utf-8') as f:
                 f.write(instructions)
+            
+            # Generate deletion report
+            report_file_id = None
+            if deleted_rows_data:
+                report_filename = f"deletion_report_{uuid.uuid4().hex[:8]}.xlsx"
+                report_path = os.path.join(app.config['REPORTS_FOLDER'], report_filename)
+                report_result = generate_deletion_report(deleted_rows_data, report_path)
+                if report_result:
+                    report_file_id = conn.execute(
+                        '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type)
+                           VALUES (?, ?, ?, ?, ?, ?)''',
+                        (file_dict['user_id'], f"DeletionReport_{file_dict['original_filename']}.xlsx",
+                         report_filename, os.path.getsize(report_path), True, 'report')
+                    ).lastrowid
             
             # Record macro and instructions in database
             macro_file_id = conn.execute(
@@ -477,30 +536,30 @@ def process_file(file_id):
             
             processing_log.append("Analysis complete - all files generated")
             
-            downloads = {
-                'macro': {
-                    'file_id': macro_file_id,
-                    'filename': f"Macro_{file_dict['original_filename']}.bas"
-                },
-                'instructions': {
-                    'file_id': instructions_file_id,
-                    'filename': f"Instructions_{file_dict['original_filename']}.txt"
-                }
-            }
-            if report_file_id:
-                downloads['report'] = {
-                    'file_id': report_file_id,
-                    'filename': f"DeletionReport_{file_dict['original_filename']}.xlsx"
-                }
-
-            return jsonify({
+            response_data = {
                 'message': 'Analysis complete',
                 'total_rows_to_delete': total_rows_to_delete,
                 'sheets_affected': list(rows_to_delete_by_sheet.keys()),
                 'processing_log': processing_log,
-                'report_file_id': report_file_id,
-                'downloads': downloads
-            }), 200
+                'downloads': {
+                    'macro': {
+                        'file_id': macro_file_id,
+                        'filename': f"Macro_{file_dict['original_filename']}.bas"
+                    },
+                    'instructions': {
+                        'file_id': instructions_file_id,
+                        'filename': f"Instructions_{file_dict['original_filename']}.txt"
+                    }
+                }
+            }
+            if report_file_id:
+                response_data['report_file_id'] = report_file_id
+                response_data['downloads']['report'] = {
+                    'file_id': report_file_id,
+                    'filename': f"DeletionReport_{file_dict['original_filename']}.xlsx"
+                }
+            
+            return jsonify(response_data), 200
             
         except Exception as processing_error:
             processing_log.append(f"Analysis error: {str(processing_error)}")
@@ -972,17 +1031,6 @@ def process_file_automated(file_id):
         
         # Get filter rules from request body
         data = request.get_json() or {}
-        filter_rules = data.get('filter_rules')
-        
-        # Validate filter rules
-        if not filter_rules or not isinstance(filter_rules, list) or len(filter_rules) == 0:
-            return jsonify({
-                'error': 'filter_rules required and must be a non-empty array'
-            }), 400
-        
-        print(f"DEBUG: Processing with {len(filter_rules)} filter rules")
-        for i, rule in enumerate(filter_rules, 1):
-            print(f"DEBUG: Rule {i}: Column {rule.get('column')} = '{rule.get('value')}'")
         
         # Get file info and verify ownership
         conn = get_db()
@@ -992,9 +1040,27 @@ def process_file_automated(file_id):
         
         if not user:
             print("DEBUG: User not found in database")
+            conn.close()
             return jsonify({'error': 'User not found'}), 404
         
         print(f"DEBUG: User ID: {user['id']}")
+        
+        # Resolve profile or use inline rules
+        filter_rules, columns_to_remove, err = _resolve_profile(data, user['id'], conn)
+        if err:
+            conn.close()
+            return err
+        
+        # Validate filter rules
+        if not filter_rules or not isinstance(filter_rules, list) or len(filter_rules) == 0:
+            conn.close()
+            return jsonify({
+                'error': 'filter_rules required and must be a non-empty array'
+            }), 400
+        
+        print(f"DEBUG: Processing with {len(filter_rules)} filter rules")
+        for i, rule in enumerate(filter_rules, 1):
+            print(f"DEBUG: Rule {i}: Column {rule.get('column')} = '{rule.get('value')}'")
         
         file_info = conn.execute(
             '''SELECT f.* FROM files f
@@ -1052,7 +1118,7 @@ def process_file_automated(file_id):
         github_auth = GitHubAppAuth()
         github_token = github_auth.get_installation_token()
         
-        # Prepare GitHub Actions payload with filter_rules
+        # Prepare GitHub Actions payload with filter_rules and columns_to_remove
         base_url = request.host_url.rstrip('/')
         github_payload = {
             "event_type": "process-excel",
@@ -1063,7 +1129,8 @@ def process_file_automated(file_id):
                 "callback_url": f"{base_url}/api/processing-callback",
                 "callback_token": callback_token,
                 "job_id": job_id,
-                "filter_rules": json.dumps(filter_rules)
+                "filter_rules": json.dumps(filter_rules),
+                "columns_to_remove": json.dumps(columns_to_remove) if columns_to_remove else "[]"
             }
         }
         
@@ -2040,6 +2107,342 @@ def delete_user(user_id):
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+# ---- Filter Profile endpoints ----
+
+MAX_PROFILE_NAME_LENGTH = 100
+MAX_PROFILE_DESCRIPTION_LENGTH = 500
+
+
+def _validate_filter_rules(rules):
+    """Validate filter_rules is a list of {column, value} dicts."""
+    if not isinstance(rules, list):
+        return False
+    for rule in rules:
+        if not isinstance(rule, dict):
+            return False
+        if 'column' not in rule or 'value' not in rule:
+            return False
+    return True
+
+
+def _validate_columns_to_remove(columns):
+    """Validate columns_to_remove is a list of uppercase column letter strings."""
+    if not isinstance(columns, list):
+        return False
+    for col in columns:
+        if not isinstance(col, str) or not re.match(r'^[A-Z]{1,3}$', col):
+            return False
+    return True
+
+
+@app.route('/api/filter-profiles', methods=['GET'])
+@jwt_required()
+def list_filter_profiles():
+    """List user's own profiles plus all system templates."""
+    try:
+        current_user_email = get_jwt_identity()
+        conn = get_db()
+        try:
+            user = conn.execute(
+                'SELECT id FROM users WHERE email = ?', (current_user_email,)
+            ).fetchone()
+            if not user:
+                return jsonify({'error': 'User not found'}), 404
+
+            rows = conn.execute(
+                '''SELECT * FROM filter_profiles
+                   WHERE user_id = ? OR is_system_template = 1
+                   ORDER BY is_system_template DESC, name ASC''',
+                (user['id'],)
+            ).fetchall()
+
+            profiles = []
+            for row in rows:
+                profiles.append({
+                    'id': row['id'],
+                    'user_id': row['user_id'],
+                    'name': row['name'],
+                    'description': row['description'],
+                    'filter_rules': json.loads(row['filter_rules_json']),
+                    'columns_to_remove': json.loads(row['columns_to_remove']),
+                    'is_system_template': bool(row['is_system_template']),
+                    'created_at': row['created_at'],
+                    'updated_at': row['updated_at'],
+                })
+
+            return jsonify({'profiles': profiles}), 200
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/filter-profiles', methods=['POST'])
+@jwt_required()
+def create_filter_profile():
+    """Create a user profile or system template (admin only)."""
+    try:
+        current_user_email = get_jwt_identity()
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({'error': 'Request body required'}), 400
+
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({'error': 'Profile name is required'}), 400
+        if len(name) > MAX_PROFILE_NAME_LENGTH:
+            return jsonify({'error': f'Profile name must be {MAX_PROFILE_NAME_LENGTH} characters or less'}), 400
+
+        description = (data.get('description') or '').strip()
+        if len(description) > MAX_PROFILE_DESCRIPTION_LENGTH:
+            return jsonify({'error': f'Description must be {MAX_PROFILE_DESCRIPTION_LENGTH} characters or less'}), 400
+
+        filter_rules = data.get('filter_rules', [])
+        if not _validate_filter_rules(filter_rules):
+            return jsonify({'error': 'filter_rules must be an array of {column, value} objects'}), 400
+
+        columns_to_remove = data.get('columns_to_remove', [])
+        # Normalize: uppercase and dedupe
+        columns_to_remove = list(dict.fromkeys([c.upper() for c in columns_to_remove if isinstance(c, str)]))
+        if not _validate_columns_to_remove(columns_to_remove):
+            return jsonify({'error': 'columns_to_remove must be an array of uppercase column letters (A-Z, AA-ZZZ)'}), 400
+
+        is_system_template = bool(data.get('is_system_template', False))
+
+        conn = get_db()
+        try:
+            user = conn.execute(
+                'SELECT id FROM users WHERE email = ?', (current_user_email,)
+            ).fetchone()
+            if not user:
+                return jsonify({'error': 'User not found'}), 404
+
+            if is_system_template:
+                if not is_admin_user(current_user_email):
+                    return jsonify({'error': 'Admin access required to create system templates'}), 403
+                user_id = None
+            else:
+                user_id = user['id']
+
+            now = datetime.utcnow().isoformat()
+            cursor = conn.execute(
+                '''INSERT INTO filter_profiles
+                   (user_id, name, description, filter_rules_json, columns_to_remove, is_system_template, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                (user_id, name, description, json.dumps(filter_rules), json.dumps(columns_to_remove),
+                 1 if is_system_template else 0, now, now)
+            )
+            conn.commit()
+
+            profile_id = cursor.lastrowid
+            return jsonify({
+                'id': profile_id,
+                'name': name,
+                'description': description,
+                'filter_rules': filter_rules,
+                'columns_to_remove': columns_to_remove,
+                'is_system_template': is_system_template,
+                'message': 'Profile created successfully'
+            }), 201
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/filter-profiles/<int:profile_id>', methods=['PUT'])
+@jwt_required()
+def update_filter_profile(profile_id):
+    """Update a profile. Owner can update own; admin can update system templates."""
+    try:
+        current_user_email = get_jwt_identity()
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({'error': 'Request body required'}), 400
+
+        conn = get_db()
+        try:
+            user = conn.execute(
+                'SELECT id FROM users WHERE email = ?', (current_user_email,)
+            ).fetchone()
+            if not user:
+                return jsonify({'error': 'User not found'}), 404
+
+            profile = conn.execute(
+                'SELECT * FROM filter_profiles WHERE id = ?', (profile_id,)
+            ).fetchone()
+            if not profile:
+                return jsonify({'error': 'Profile not found'}), 404
+
+            # Authorization check
+            if profile['is_system_template']:
+                if not is_admin_user(current_user_email):
+                    return jsonify({'error': 'Admin access required to update system templates'}), 403
+            else:
+                if profile['user_id'] != user['id']:
+                    return jsonify({'error': 'You can only update your own profiles'}), 403
+
+            # Build update fields
+            name = data.get('name')
+            if name is not None:
+                name = name.strip()
+                if not name:
+                    return jsonify({'error': 'Profile name cannot be empty'}), 400
+                if len(name) > MAX_PROFILE_NAME_LENGTH:
+                    return jsonify({'error': f'Profile name must be {MAX_PROFILE_NAME_LENGTH} characters or less'}), 400
+
+            description = data.get('description')
+            if description is not None:
+                description = description.strip()
+                if len(description) > MAX_PROFILE_DESCRIPTION_LENGTH:
+                    return jsonify({'error': f'Description must be {MAX_PROFILE_DESCRIPTION_LENGTH} characters or less'}), 400
+
+            filter_rules = data.get('filter_rules')
+            if filter_rules is not None:
+                if not _validate_filter_rules(filter_rules):
+                    return jsonify({'error': 'filter_rules must be an array of {column, value} objects'}), 400
+
+            columns_to_remove = data.get('columns_to_remove')
+            if columns_to_remove is not None:
+                columns_to_remove = list(dict.fromkeys([c.upper() for c in columns_to_remove if isinstance(c, str)]))
+                if not _validate_columns_to_remove(columns_to_remove):
+                    return jsonify({'error': 'columns_to_remove must be an array of uppercase column letters'}), 400
+
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                '''UPDATE filter_profiles SET
+                   name = COALESCE(?, name),
+                   description = COALESCE(?, description),
+                   filter_rules_json = COALESCE(?, filter_rules_json),
+                   columns_to_remove = COALESCE(?, columns_to_remove),
+                   updated_at = ?
+                   WHERE id = ?''',
+                (
+                    name,
+                    description,
+                    json.dumps(filter_rules) if filter_rules is not None else None,
+                    json.dumps(columns_to_remove) if columns_to_remove is not None else None,
+                    now,
+                    profile_id
+                )
+            )
+            conn.commit()
+
+            # Fetch updated profile
+            updated = conn.execute(
+                'SELECT * FROM filter_profiles WHERE id = ?', (profile_id,)
+            ).fetchone()
+
+            return jsonify({
+                'id': updated['id'],
+                'name': updated['name'],
+                'description': updated['description'],
+                'filter_rules': json.loads(updated['filter_rules_json']),
+                'columns_to_remove': json.loads(updated['columns_to_remove']),
+                'is_system_template': bool(updated['is_system_template']),
+                'message': 'Profile updated successfully'
+            }), 200
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/filter-profiles/<int:profile_id>', methods=['DELETE'])
+@jwt_required()
+def delete_filter_profile(profile_id):
+    """Delete a profile. Owner can delete own; admin can delete system templates."""
+    try:
+        current_user_email = get_jwt_identity()
+        conn = get_db()
+        try:
+            user = conn.execute(
+                'SELECT id FROM users WHERE email = ?', (current_user_email,)
+            ).fetchone()
+            if not user:
+                return jsonify({'error': 'User not found'}), 404
+
+            profile = conn.execute(
+                'SELECT * FROM filter_profiles WHERE id = ?', (profile_id,)
+            ).fetchone()
+            if not profile:
+                return jsonify({'error': 'Profile not found'}), 404
+
+            # Authorization check
+            if profile['is_system_template']:
+                if not is_admin_user(current_user_email):
+                    return jsonify({'error': 'Admin access required to delete system templates'}), 403
+            else:
+                if profile['user_id'] != user['id']:
+                    return jsonify({'error': 'You can only delete your own profiles'}), 403
+
+            conn.execute('DELETE FROM filter_profiles WHERE id = ?', (profile_id,))
+            conn.commit()
+
+            return jsonify({'message': 'Profile deleted successfully'}), 200
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/filter-profiles/<int:profile_id>/clone', methods=['POST'])
+@jwt_required()
+def clone_filter_profile(profile_id):
+    """Clone a system template into the user's own profiles."""
+    try:
+        current_user_email = get_jwt_identity()
+        conn = get_db()
+        try:
+            user = conn.execute(
+                'SELECT id FROM users WHERE email = ?', (current_user_email,)
+            ).fetchone()
+            if not user:
+                return jsonify({'error': 'User not found'}), 404
+
+            profile = conn.execute(
+                'SELECT * FROM filter_profiles WHERE id = ?', (profile_id,)
+            ).fetchone()
+            if not profile:
+                return jsonify({'error': 'Profile not found'}), 404
+
+            if not profile['is_system_template']:
+                return jsonify({'error': 'Only system templates can be cloned'}), 400
+
+            data = request.get_json() or {}
+            clone_name = (data.get('name') or '').strip()
+            if not clone_name:
+                clone_name = f"{profile['name']} (Copy)"
+            if len(clone_name) > MAX_PROFILE_NAME_LENGTH:
+                return jsonify({'error': f'Profile name must be {MAX_PROFILE_NAME_LENGTH} characters or less'}), 400
+
+            now = datetime.utcnow().isoformat()
+            cursor = conn.execute(
+                '''INSERT INTO filter_profiles
+                   (user_id, name, description, filter_rules_json, columns_to_remove, is_system_template, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 0, ?, ?)''',
+                (user['id'], clone_name, profile['description'],
+                 profile['filter_rules_json'], profile['columns_to_remove'],
+                 now, now)
+            )
+            conn.commit()
+
+            new_id = cursor.lastrowid
+            return jsonify({
+                'id': new_id,
+                'name': clone_name,
+                'description': profile['description'],
+                'filter_rules': json.loads(profile['filter_rules_json']),
+                'columns_to_remove': json.loads(profile['columns_to_remove']),
+                'is_system_template': False,
+                'message': 'Profile cloned successfully'
+            }), 201
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':  # pragma: no cover
     app.run(debug=True)

@@ -100,10 +100,10 @@ End Sub
     return macro_header + macro_body + macro_footer
 
 
-def generate_instructions(original_filename, total_rows, sheet_names, filter_rules):
+def generate_instructions(original_filename, total_rows, sheet_names, filter_rules, columns_to_remove=None):
     """Generate step-by-step instructions for using the macro"""
     
-    # Build filter description
+    # Build filter description -- all rules are empty/zero checks (parity with UNO)
     bullet = "\u2022"
     arrow = "\u2192"
     nl = chr(10)
@@ -111,11 +111,22 @@ def generate_instructions(original_filename, total_rows, sheet_names, filter_rul
     for rule in filter_rules:
         filter_desc += f"  {bullet} Column {rule['column']} is empty or zero\n"
 
+    # Build column removal description
+    col_removal_desc = ""
+    if columns_to_remove:
+        col_removal_desc = "\nColumns to be removed (entire column regardless of content):\n"
+        for col in columns_to_remove:
+            col_removal_desc += f"  {bullet} Column {col}\n"
+        col_removal_desc += "Note: Columns are removed after row deletion, right-to-left.\n"
+
     sheet_list = nl.join(bullet + " " + sheet for sheet in sheet_names)
     sheet_breakdown = nl.join(
         bullet + " " + sheet + ": rows to review and potentially delete"
         for sheet in sheet_names
     )
+
+    # Build manual deletion column description from actual rules
+    manual_cols = ", ".join(rule['column'] for rule in filter_rules)
 
     return f"""EXCEL FILE CLEANUP INSTRUCTIONS
 Generated for: {original_filename}
@@ -125,7 +136,7 @@ Generated on: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC
 Analysis found {total_rows} rows to be deleted across {len(sheet_names)} sheet(s):
 {sheet_list}
 
-{filter_desc}
+{filter_desc}{col_removal_desc}
 
 === METHOD 1: LIBREOFFICE CALC MACRO (RECOMMENDED) ===
 
@@ -154,7 +165,7 @@ Analysis found {total_rows} rows to be deleted across {len(sheet_names)} sheet(s
 === METHOD 2: MANUAL DELETION ===
 
 If you prefer to delete rows manually, here's what to look for:
-- Find rows where columns F, G, H, and I are ALL empty or contain only zeros
+- Find rows where columns {manual_cols} are ALL empty or contain only zeros
 - Delete these entire rows
 - Work from bottom to top to avoid row number changes
 
@@ -164,6 +175,7 @@ Sheet-by-sheet breakdown:
 === IMPORTANT NOTES ===
 - This process will preserve all images, charts, and formatting
 - The macro deletes entire rows, not just cell contents
+- Rows with empty Column A are skipped (not evaluated for deletion)
 - Always backup your file before making changes
 - If you encounter issues, you can restore from your backup
 
