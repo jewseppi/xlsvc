@@ -94,10 +94,8 @@ jobs:
             mkdir -p uploads tmp macros processed
             chmod 755 uploads macros processed
 
-            # Initialize database if it doesn't exist
-            if [ ! -f xlsvc.db ]; then
-              python -c "from main import init_db; init_db()" || echo "Database init skipped - no init_db function"
-            fi
+            # Always run migrations (CREATE TABLE IF NOT EXISTS + ALTER TABLE are idempotent)
+            python -c "from db import init_db; init_db()" || echo "Database migration failed - check logs"
 
             # Create/update .htaccess
             cat > .htaccess << 'HTACCESS_EOF'
