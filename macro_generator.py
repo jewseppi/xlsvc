@@ -1,7 +1,7 @@
 from datetime import datetime
 
 
-def generate_libreoffice_macro(original_filename, rows_to_delete_by_sheet, filter_rules=None):
+def generate_libreoffice_macro(original_filename, rows_to_delete_by_sheet, filter_rules=None, columns_to_remove=None):
     """Generate a LibreOffice Calc macro that deletes rows"""
     
     macro_header = f'''REM Macro generated to clean up: {original_filename}
@@ -79,6 +79,31 @@ Sub DeleteEmptyRows()
         macro_body += '''    End If
 '''
 
+    # Build column removal code (right-to-left to preserve indices)
+    macro_col_removal = ""
+    if columns_to_remove:
+        # Convert column letters to 0-based indices, sort descending
+        col_indices = []
+        for col_letter in columns_to_remove:
+            col_letter = col_letter.strip().upper()
+            idx = 0
+            for ch in col_letter:
+                idx = idx * 26 + (ord(ch) - ord('A') + 1)
+            col_indices.append((idx - 1, col_letter))
+        col_indices.sort(key=lambda x: x[0], reverse=True)
+
+        for sheet_name in rows_to_delete_by_sheet:
+            macro_col_removal += f'''
+    ' Remove columns from sheet: {sheet_name}
+    If oDoc.Sheets.hasByName("{sheet_name}") Then
+        oSheet = oDoc.Sheets.getByName("{sheet_name}")
+'''
+            for col_idx, col_letter in col_indices:
+                macro_col_removal += f'''        oSheet.Columns.removeByIndex({col_idx}, 1)  ' Column {col_letter}
+'''
+            macro_col_removal += '''    End If
+'''
+
     macro_footer = '''
     _SafeSetEnable oController, True
     _SaveAndQuit oDoc
@@ -97,7 +122,7 @@ EH:
 End Sub
 '''
 
-    return macro_header + macro_body + macro_footer
+    return macro_header + macro_body + macro_col_removal + macro_footer
 
 
 def generate_instructions(original_filename, total_rows, sheet_names, filter_rules, columns_to_remove=None):

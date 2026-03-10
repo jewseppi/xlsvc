@@ -39,6 +39,7 @@ jobs:
       - name: Process Excel file with UNO
         env:
           FILTER_RULES: ${{ github.event.client_payload.filter_rules }}
+          COLUMNS_TO_REMOVE: ${{ github.event.client_payload.columns_to_remove }}
         run: |
           python3 process_uno.py > process_output.log 2>&1
           cat process_output.log

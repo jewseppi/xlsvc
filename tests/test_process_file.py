@@ -486,6 +486,51 @@ class TestGenerateLibreOfficeMacro:
         # Should have multiple removeByIndex calls
         assert macro.count('removeByIndex') >= 3
 
+    def test_generate_macro_with_columns_to_remove(self):
+        """Test macro generation with columns_to_remove produces right-to-left removal VBA"""
+        rows_to_delete_by_sheet = {
+            'Sheet1': [2, 3]
+        }
+        macro = generate_libreoffice_macro(
+            'test.xlsx',
+            rows_to_delete_by_sheet,
+            [],
+            columns_to_remove=['B', 'D']
+        )
+
+        # Should contain Columns.removeByIndex calls
+        assert 'Columns.removeByIndex' in macro
+
+        # D (index 3) should appear before B (index 1) — right-to-left order
+        d_pos = macro.index('Columns.removeByIndex(3, 1)')
+        b_pos = macro.index('Columns.removeByIndex(1, 1)')
+        assert d_pos < b_pos, "Column D (index 3) must be removed before Column B (index 1)"
+
+    def test_generate_macro_without_columns_to_remove(self):
+        """Test macro generation without columns_to_remove has no column removal code"""
+        rows_to_delete_by_sheet = {
+            'Sheet1': [2]
+        }
+        macro = generate_libreoffice_macro(
+            'test.xlsx',
+            rows_to_delete_by_sheet,
+            []
+        )
+        assert 'Columns.removeByIndex' not in macro
+
+    def test_generate_macro_columns_to_remove_empty_list(self):
+        """Test macro generation with empty columns_to_remove list"""
+        rows_to_delete_by_sheet = {
+            'Sheet1': [2]
+        }
+        macro = generate_libreoffice_macro(
+            'test.xlsx',
+            rows_to_delete_by_sheet,
+            [],
+            columns_to_remove=[]
+        )
+        assert 'Columns.removeByIndex' not in macro
+
 
 class TestGenerateInstructions:
     """Tests for generate_instructions function"""
@@ -693,8 +738,8 @@ class TestColumnsToRemoveValidation:
         assert response.status_code == 400
         assert 'columns_to_remove' in response.get_json()['error']
 
-    def test_valid_columns_to_remove_accepted(self, client, test_user, sample_excel_file):
-        """Valid columns_to_remove is accepted and processed."""
+    def test_valid_columns_to_remove_accepted(self, client, test_user, sample_excel_file, db_connection, test_directories):
+        """Valid columns_to_remove is accepted and macro contains column removal code."""
         login = client.post('/api/login', json={
             'email': test_user['email'], 'password': test_user['password']
         })
@@ -715,6 +760,18 @@ class TestColumnsToRemoveValidation:
 
         # Should succeed (rows are evaluated)
         assert response.status_code == 200
+        data = response.get_json()
+
+        # If rows were found, verify macro contains column removal code
+        if data.get('total_rows_to_delete', 0) > 0:
+            macro_file_id = data['downloads']['macro']['file_id']
+            macro_info = db_connection.execute(
+                'SELECT stored_filename FROM files WHERE id = ?', (macro_file_id,)
+            ).fetchone()
+            macro_path = os.path.join(test_directories['macros'], macro_info['stored_filename'])
+            with open(macro_path, 'r') as f:
+                macro_content = f.read()
+            assert 'Columns.removeByIndex' in macro_content
 
 
 class TestDeletionReportGeneration:

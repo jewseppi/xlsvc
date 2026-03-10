@@ -463,9 +463,10 @@ def process_file(file_id):
             
             # Generate macro
             macro_content = generate_libreoffice_macro(
-                file_dict['original_filename'], 
+                file_dict['original_filename'],
                 rows_to_delete_by_sheet,
-                filter_rules
+                filter_rules,
+                columns_to_remove=columns_to_remove
             )
             
             macro_filename = f"macro_{uuid.uuid4().hex[:8]}.bas"
@@ -486,20 +487,6 @@ def process_file(file_id):
             instructions_path = os.path.join(app.config['MACROS_FOLDER'], instructions_filename)
             with open(instructions_path, 'w', encoding='utf-8') as f:
                 f.write(instructions)
-            
-            # Generate deletion report
-            report_file_id = None
-            if deleted_rows_data:
-                report_filename = f"deletion_report_{uuid.uuid4().hex[:8]}.xlsx"
-                report_path = os.path.join(app.config['REPORTS_FOLDER'], report_filename)
-                report_result = generate_deletion_report(deleted_rows_data, report_path)
-                if report_result:
-                    report_file_id = conn.execute(
-                        '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type)
-                           VALUES (?, ?, ?, ?, ?, ?)''',
-                        (file_dict['user_id'], f"DeletionReport_{file_dict['original_filename']}.xlsx",
-                         report_filename, os.path.getsize(report_path), True, 'report')
-                    ).lastrowid
             
             # Record macro and instructions in database
             macro_file_id = conn.execute(

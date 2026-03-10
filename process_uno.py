@@ -43,6 +43,26 @@ def main():
         deleted_rows, deleted_data = delete_empty_rows_direct(doc, filter_rules)
         print(f"Deleted {deleted_rows} empty rows")
         
+        # Remove columns if specified
+        columns_to_remove = get_columns_to_remove()
+        if columns_to_remove:
+            print(f"Removing columns: {columns_to_remove}")
+            # Convert to 0-based indices, sort descending (right-to-left)
+            col_indices = []
+            for col_letter in columns_to_remove:
+                col_indices.append((column_to_index(col_letter), col_letter))
+            col_indices.sort(key=lambda x: x[0], reverse=True)
+
+            sheets = doc.getSheets()
+            for sheet_idx in range(sheets.getCount()):
+                sheet = sheets.getByIndex(sheet_idx)
+                for col_idx, col_letter in col_indices:
+                    try:
+                        sheet.getColumns().removeByIndex(col_idx, 1)
+                    except Exception as e:
+                        print(f"Error removing column {col_letter} from {sheet.getName()}: {e}")
+            print(f"Column removal complete")
+
         # Save processed file
         output_path = os.path.abspath("output.xlsx")
         output_url = uno.systemPathToFileUrl(output_path)
@@ -74,6 +94,17 @@ def main():
         import traceback
         traceback.print_exc()
         return 1
+
+def get_columns_to_remove():
+    """Get columns to remove from environment variable"""
+    columns_json = os.getenv('COLUMNS_TO_REMOVE', '[]')
+    try:
+        columns = json.loads(columns_json)
+        if not isinstance(columns, list):
+            return []
+        return [str(c).strip().upper() for c in columns if str(c).strip()]
+    except json.JSONDecodeError:
+        return []
 
 def get_filter_rules():
     """Get filter rules from environment variable"""
