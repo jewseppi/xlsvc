@@ -36,7 +36,11 @@ app.config['REPORTS_FOLDER'] = 'reports'
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 
 # Initialize extensions
-CORS(app, origins=['http://localhost:5173', 'https://xlsvc.jsilverman.ca'])
+CORS(app, origins=[
+    'http://localhost:5173',
+    'https://xlsvc.jsilverman.ca',
+    re.compile(r'https://([a-z0-9-]+\.)*xlsvc-app\.pages\.dev'),
+])
 jwt = JWTManager(app)
 
 # Security headers middleware
