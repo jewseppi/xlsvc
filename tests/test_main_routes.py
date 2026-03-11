@@ -9,6 +9,43 @@ from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 
 
+class TestPreviewMode:
+    """Preview mode read-only enforcement via X-Preview-Mode header."""
+
+    def test_preview_mode_blocks_post(self, client):
+        """Non-safe POST returns 403 in preview mode."""
+        r = client.post(
+            "/api/subscribe",
+            json={"email": "test@example.com"},
+            headers={"X-Preview-Mode": "true"},
+        )
+        assert r.status_code == 403
+        assert "preview mode" in r.get_json()["error"].lower()
+
+    def test_preview_mode_allows_login(self, client):
+        """Login is whitelisted even in preview mode."""
+        r = client.post(
+            "/api/login",
+            json={"email": "wrong@example.com", "password": "wrong"},
+            headers={"X-Preview-Mode": "true"},
+        )
+        # 401 means it reached the handler (not blocked by preview mode)
+        assert r.status_code == 401
+
+    def test_preview_mode_allows_get(self, client):
+        """GET requests pass through in preview mode."""
+        r = client.get(
+            "/api/health",
+            headers={"X-Preview-Mode": "true"},
+        )
+        assert r.status_code == 200
+
+    def test_no_preview_header_allows_post(self, client):
+        """Without preview header, POST works normally."""
+        r = client.post("/api/subscribe", json={"email": "test@example.com"})
+        assert r.status_code == 200
+
+
 class TestSubscribe:
     """POST /api/subscribe (used by landing.html notification form)."""
 
