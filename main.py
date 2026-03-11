@@ -43,6 +43,15 @@ CORS(app, origins=[
 ])
 jwt = JWTManager(app)
 
+# Preview mode — read-only enforcement for Cloudflare Pages preview builds
+_PREVIEW_SAFE = {'/api/login', '/api/logout', '/api/refresh'}
+
+@app.before_request
+def enforce_preview_mode():
+    if request.headers.get('X-Preview-Mode') == 'true':
+        if request.method not in ('GET', 'HEAD', 'OPTIONS') and request.path not in _PREVIEW_SAFE:
+            return jsonify({'error': 'This action is not available in preview mode'}), 403
+
 # Security headers middleware
 @app.after_request
 def add_security_headers(response):
