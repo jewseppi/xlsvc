@@ -1,5 +1,5 @@
 from deletion_report import generate_deletion_report, capture_row_data
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, abort, make_response
 from flask_cors import CORS, cross_origin
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -15,6 +15,7 @@ import sqlite3
 import os
 from datetime import datetime, timedelta
 import uuid
+import shutil
 from openpyxl import load_workbook
 import hashlib
 import requests
@@ -33,7 +34,15 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['PROCESSED_FOLDER'] = 'processed'
 app.config['MACROS_FOLDER'] = 'macros'
 app.config['REPORTS_FOLDER'] = 'reports'
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max per-request size (chunks stay well under this)
+
+# Chunked-upload limits. Chunks are small (under MAX_CONTENT_LENGTH); the total
+# assembled-file ceiling is enforced logically at init/chunk/complete.
+MAX_UPLOAD_SIZE = 256 * 1024 * 1024  # 256MB max assembled file
+CHUNK_SIZE = 8 * 1024 * 1024  # advisory chunk size returned to clients (8MB)
+# Files larger than this (or any legacy .xls) cannot be analyzed in-process by
+# openpyxl on shared hosting; they must use the automated (GitHub Actions) path.
+INLINE_PROCESS_MAX_SIZE = 50 * 1024 * 1024  # 50MB
 
 # Initialize extensions
 CORS(app, origins=[
@@ -226,61 +235,231 @@ def upload_file():
         if not allowed_file(file.filename):
             return jsonify({'error': 'Only .xls and .xlsx files allowed'}), 400
         
-        # Validate file content using magic bytes
-        try:
-            validate_excel_file(file)
-        except ValueError as e:
-            return jsonify({'error': str(e)}), 400
-
-        # Generate unique filename for storage
+        # Save to disk, then validate/hash/dedup/register via the shared finalizer.
         original_filename = secure_filename(file.filename)
         file_extension = original_filename.rsplit('.', 1)[1].lower()
         stored_filename = f"{uuid.uuid4()}.{file_extension}"
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
-        
-        # Save file temporarily to calculate hash
         file.save(file_path)
-        file_size = os.path.getsize(file_path)
-        file_hash = calculate_file_hash(file_path)
-        
-        # Check if this exact file already exists for this user
-        existing_file = conn.execute(
-            '''SELECT id, original_filename FROM files 
-               WHERE user_id = ? AND file_hash = ? AND original_filename = ?''',
-            (user_id, file_hash, original_filename)
-        ).fetchone()
-        
-        if existing_file:
-            # Delete the newly uploaded duplicate
-            os.remove(file_path)
-            conn.close()
-            
-            return jsonify({
-                'message': 'File already exists',
-                'file_id': existing_file['id'],
-                'filename': existing_file['original_filename'],
-                'duplicate': True
-            }), 200
-        
-        # Save to database with hash
-        file_id = conn.execute(
-            '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, file_hash, file_type) 
-            VALUES (?, ?, ?, ?, ?, ?)''',
-            (user_id, original_filename, stored_filename, file_size, file_hash, 'original')
-        ).lastrowid
-        conn.commit()
-        conn.close()
-        
-        return jsonify({
-            'message': 'File uploaded successfully',
-            'file_id': file_id,
-            'filename': original_filename,
-            'size': file_size,
-            'duplicate': False
-        }), 201
-        
+
+        return _finalize_uploaded_file(conn, user_id, original_filename, stored_filename, file_path)
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+def _finalize_uploaded_file(conn, user_id, original_filename, stored_filename, file_path):
+    """Validate magic bytes, dedup by hash, and register an already-saved upload.
+
+    Shared by the single-shot /api/upload and the chunked /api/upload/complete
+    paths. Always closes ``conn``. Returns a Flask (response, status) tuple.
+    """
+    # Validate file content using magic bytes (read from the assembled file)
+    try:
+        with open(file_path, 'rb') as fh:
+            validate_excel_file(fh)
+    except ValueError as e:
+        os.remove(file_path)
+        conn.close()
+        return jsonify({'error': str(e)}), 400
+
+    file_size = os.path.getsize(file_path)
+    file_hash = calculate_file_hash(file_path)
+
+    # Check if this exact file already exists for this user
+    existing_file = conn.execute(
+        '''SELECT id, original_filename FROM files
+           WHERE user_id = ? AND file_hash = ? AND original_filename = ?''',
+        (user_id, file_hash, original_filename)
+    ).fetchone()
+
+    if existing_file:
+        os.remove(file_path)
+        conn.close()
+        return jsonify({
+            'message': 'File already exists',
+            'file_id': existing_file['id'],
+            'filename': existing_file['original_filename'],
+            'duplicate': True
+        }), 200
+
+    file_id = conn.execute(
+        '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, file_hash, file_type)
+        VALUES (?, ?, ?, ?, ?, ?)''',
+        (user_id, original_filename, stored_filename, file_size, file_hash, 'original')
+    ).lastrowid
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        'message': 'File uploaded successfully',
+        'file_id': file_id,
+        'filename': original_filename,
+        'size': file_size,
+        'duplicate': False
+    }), 201
+
+
+# ---------------------------------------------------------------------------
+# Chunked upload (for large files that exceed single-request limits)
+# ---------------------------------------------------------------------------
+
+def _require_user(conn):
+    """Resolve the JWT identity to a user id, or abort 404. Leaves conn open."""
+    email = get_jwt_identity()
+    row = conn.execute('SELECT id FROM users WHERE email = ?', (email,)).fetchone()
+    if not row:
+        conn.close()
+        abort(make_response(jsonify({'error': 'User not found'}), 404))
+    return row['id']
+
+
+def _chunk_dir(upload_id):
+    return os.path.join(app.config['UPLOAD_FOLDER'], '.chunks', upload_id)
+
+
+def _require_session(conn, user_id, upload_id):
+    """Fetch an owned upload session, or abort 404. Leaves conn open."""
+    row = conn.execute(
+        'SELECT * FROM upload_sessions WHERE upload_id = ? AND user_id = ?',
+        (upload_id, user_id)
+    ).fetchone()
+    if not row:
+        conn.close()
+        abort(make_response(jsonify({'error': 'Upload session not found'}), 404))
+    return row
+
+
+def _delete_session(conn, upload_id):
+    """Remove a session's temp chunk dir and its DB row, then commit."""
+    shutil.rmtree(_chunk_dir(upload_id), ignore_errors=True)
+    conn.execute('DELETE FROM upload_sessions WHERE upload_id = ?', (upload_id,))
+    conn.commit()
+
+
+@app.route('/api/upload/init', methods=['POST'])
+@jwt_required()
+def upload_init():
+    """Begin a chunked upload. Validates extension and total size up front."""
+    conn = get_db()
+    user_id = _require_user(conn)
+
+    data = request.get_json() or {}
+    filename = data.get('filename', '')
+    total_size = data.get('total_size')
+    total_chunks = data.get('total_chunks')
+
+    if not filename or not allowed_file(filename):
+        conn.close()
+        return jsonify({'error': 'Only .xls and .xlsx files allowed'}), 400
+    if not isinstance(total_size, int) or total_size <= 0 or total_size > MAX_UPLOAD_SIZE:
+        conn.close()
+        return jsonify({'error': f'File too large (max {MAX_UPLOAD_SIZE // (1024 * 1024)}MB)'}), 400
+    if not isinstance(total_chunks, int) or total_chunks <= 0:
+        conn.close()
+        return jsonify({'error': 'Invalid total_chunks'}), 400
+
+    upload_id = uuid.uuid4().hex
+    os.makedirs(_chunk_dir(upload_id), exist_ok=True)
+    conn.execute(
+        '''INSERT INTO upload_sessions (upload_id, user_id, filename, total_size, total_chunks)
+           VALUES (?, ?, ?, ?, ?)''',
+        (upload_id, user_id, secure_filename(filename), total_size, total_chunks)
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'upload_id': upload_id, 'chunk_size': CHUNK_SIZE}), 201
+
+
+@app.route('/api/upload/chunk/<upload_id>', methods=['POST'])
+@jwt_required()
+def upload_chunk(upload_id):
+    """Receive one chunk and write it to the session's temp dir."""
+    conn = get_db()
+    user_id = _require_user(conn)
+    session = _require_session(conn, user_id, upload_id)
+
+    if 'chunk' not in request.files:
+        conn.close()
+        return jsonify({'error': 'No chunk provided'}), 400
+    try:
+        index = int(request.form.get('index', ''))
+    except (TypeError, ValueError):
+        conn.close()
+        return jsonify({'error': 'Invalid chunk index'}), 400
+    if index < 0 or index >= session['total_chunks']:
+        conn.close()
+        return jsonify({'error': 'Chunk index out of range'}), 400
+
+    chunk_dir = _chunk_dir(upload_id)
+    os.makedirs(chunk_dir, exist_ok=True)
+    request.files['chunk'].save(os.path.join(chunk_dir, f'{index}.part'))
+
+    # Recompute received bytes from disk (idempotent if a chunk is re-sent).
+    received = sum(
+        os.path.getsize(os.path.join(chunk_dir, p)) for p in os.listdir(chunk_dir)
+    )
+    if received > MAX_UPLOAD_SIZE:
+        _delete_session(conn, upload_id)
+        conn.close()
+        return jsonify({'error': 'Upload exceeds maximum size'}), 400
+
+    conn.execute(
+        'UPDATE upload_sessions SET received_bytes = ? WHERE upload_id = ?',
+        (received, upload_id)
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'index': index, 'received_bytes': received}), 200
+
+
+@app.route('/api/upload/complete/<upload_id>', methods=['POST'])
+@jwt_required()
+def upload_complete(upload_id):
+    """Assemble all chunks into the final file and register it."""
+    conn = get_db()
+    user_id = _require_user(conn)
+    session = _require_session(conn, user_id, upload_id)
+
+    chunk_dir = _chunk_dir(upload_id)
+    total_chunks = session['total_chunks']
+    missing = [
+        i for i in range(total_chunks)
+        if not os.path.exists(os.path.join(chunk_dir, f'{i}.part'))
+    ]
+    if missing:
+        conn.close()
+        return jsonify({'error': f'Missing chunks: {missing}'}), 400
+
+    original_filename = session['filename']
+    file_extension = original_filename.rsplit('.', 1)[1].lower()
+    stored_filename = f"{uuid.uuid4()}.{file_extension}"
+    final_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
+
+    # Concatenate chunks in order (streamed, never fully in memory).
+    with open(final_path, 'wb') as out:
+        for i in range(total_chunks):
+            with open(os.path.join(chunk_dir, f'{i}.part'), 'rb') as part:
+                shutil.copyfileobj(part, out)
+
+    _delete_session(conn, upload_id)
+    return _finalize_uploaded_file(conn, user_id, original_filename, stored_filename, final_path)
+
+
+@app.route('/api/upload/abort/<upload_id>', methods=['POST'])
+@jwt_required()
+def upload_abort(upload_id):
+    """Cancel an in-progress chunked upload and discard its chunks."""
+    conn = get_db()
+    user_id = _require_user(conn)
+    row = conn.execute(
+        'SELECT upload_id FROM upload_sessions WHERE upload_id = ? AND user_id = ?',
+        (upload_id, user_id)
+    ).fetchone()
+    if row:
+        _delete_session(conn, upload_id)
+    conn.close()
+    return jsonify({'message': 'Upload aborted'}), 200
 
 # Get user's files
 @app.route('/api/files', methods=['GET'])
@@ -403,7 +582,18 @@ def process_file(file_id):
         
         if not os.path.exists(input_path):
             return jsonify({'error': 'File not found on disk'}), 404
-        
+
+        # Guard: the inline path loads the whole workbook into memory via openpyxl,
+        # which OOMs on large files and cannot read legacy .xls at all. Route those
+        # to automated processing (GitHub Actions + LibreOffice) instead.
+        file_ext = file_dict['original_filename'].rsplit('.', 1)[-1].lower()
+        if file_ext == 'xls' or os.path.getsize(input_path) > INLINE_PROCESS_MAX_SIZE:
+            conn.close()
+            return jsonify({
+                'error': 'This file is too large or in a legacy format for inline processing. Use automated processing.',
+                'use_automated': True
+            }), 413
+
         # Analyze the Excel file
         processing_log = []
         rows_to_delete_by_sheet = {}

@@ -168,9 +168,22 @@ def test_app(test_db_path, test_directories, monkeypatch):
         )
     ''')
     
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS upload_sessions (
+            upload_id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            filename TEXT NOT NULL,
+            total_size INTEGER NOT NULL,
+            total_chunks INTEGER NOT NULL,
+            received_bytes INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+
     conn.commit()
     conn.close()
-    
+
     # Push application context so current_app works in extracted modules
     ctx = app.app_context()
     ctx.push()

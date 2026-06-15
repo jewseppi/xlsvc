@@ -1,7 +1,8 @@
 import os
+import shutil
 from datetime import datetime, timedelta
 from db import get_db
-from file_utils import get_file_path
+from file_utils import get_file_path, _get_folders
 
 
 def cleanup_old_files():
@@ -108,6 +109,19 @@ def cleanup_old_files():
         if jobs_deleted > 0:
             deleted_count += jobs_deleted
             print(f"CLEANUP: Deleted {jobs_deleted} old processing job records")
+
+        # Step 4: Remove stale chunked-upload sessions (and their temp dirs) older than 6 hours
+        chunk_cutoff = (datetime.utcnow() - timedelta(hours=6)).isoformat()
+        chunk_base = os.path.join(_get_folders()[0], '.chunks')
+        stale_sessions = conn.execute(
+            'SELECT upload_id FROM upload_sessions WHERE created_at < ?',
+            (chunk_cutoff,)
+        ).fetchall()
+        for session in stale_sessions:
+            upload_id = dict(session)['upload_id']
+            shutil.rmtree(os.path.join(chunk_base, upload_id), ignore_errors=True)
+            conn.execute('DELETE FROM upload_sessions WHERE upload_id = ?', (upload_id,))
+            deleted_count += 1
 
         if deleted_count > 0:
             conn.commit()
