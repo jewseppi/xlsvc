@@ -524,7 +524,11 @@ def _resolve_profile(data, user_id, conn):
         if not profile['is_system_template'] and profile['user_id'] != user_id:
             return None, None, (jsonify({'error': 'Access denied to this profile'}), 403)
         filter_rules = json.loads(profile['filter_rules_json'])
-        columns_to_remove = json.loads(profile['columns_to_remove'])
+        # Only fall back to the profile's columns when the caller didn't
+        # supply its own, so columns chosen in the UI aren't silently dropped
+        # when a profile is also selected.
+        if not columns_to_remove:
+            columns_to_remove = json.loads(profile['columns_to_remove'])
 
     return filter_rules, columns_to_remove, None
 

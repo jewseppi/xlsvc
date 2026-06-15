@@ -896,6 +896,36 @@ class TestProfileAwareProcessing:
         db_connection.execute("DELETE FROM filter_profiles WHERE id = 100")
         db_connection.commit()
 
+    def test_request_columns_to_remove_override_profile(self, test_app, test_user, db_connection):
+        """columns_to_remove from the request wins over the profile's; absent, the profile's is used."""
+        import main
+        db_connection.execute(
+            """INSERT INTO filter_profiles
+               (id, user_id, name, filter_rules_json, columns_to_remove, is_system_template)
+               VALUES (103, ?, 'P', '[{"column":"F","value":"0"}]', '["Z"]', 0)""",
+            (test_user['id'],)
+        )
+        db_connection.commit()
+        conn = main.get_db()
+        try:
+            # Request supplies its own columns -> not overridden by the profile's ["Z"]
+            rules, cols, err = main._resolve_profile(
+                {'profile_id': 103, 'columns_to_remove': ['B']}, test_user['id'], conn
+            )
+            assert err is None
+            assert cols == ['B']
+            assert rules == [{'column': 'F', 'value': '0'}]
+            # Request omits columns -> fall back to the profile's
+            _, cols2, err2 = main._resolve_profile(
+                {'profile_id': 103}, test_user['id'], conn
+            )
+            assert err2 is None
+            assert cols2 == ['Z']
+        finally:
+            conn.close()
+            db_connection.execute("DELETE FROM filter_profiles WHERE id = 103")
+            db_connection.commit()
+
     def test_process_file_with_system_template(self, client, test_user, sample_excel_file, db_connection):
         """Process file using a system template profile."""
         login = client.post('/api/login', json={
