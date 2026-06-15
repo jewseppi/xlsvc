@@ -526,8 +526,8 @@ def process_file(file_id):
                     report_file_id = conn.execute(
                         '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id)
                            VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                        (file_dict['user_id'], f"DeletionReport_{file_dict['original_filename']}.xlsx",
-                         report_stored_filename, os.path.getsize(report_path), True, 'report', file_id)
+                        (file_dict['user_id'], f"MacroDeletionReport_{file_dict['original_filename']}.xlsx",
+                         report_stored_filename, os.path.getsize(report_path), True, 'macro_report', file_id)
                     ).lastrowid
 
             conn.execute('UPDATE files SET processed = TRUE WHERE id = ?', (file_id,))
@@ -556,7 +556,7 @@ def process_file(file_id):
                 response_data['report_file_id'] = report_file_id
                 response_data['downloads']['report'] = {
                     'file_id': report_file_id,
-                    'filename': f"DeletionReport_{file_dict['original_filename']}.xlsx"
+                    'filename': f"MacroDeletionReport_{file_dict['original_filename']}.xlsx"
                 }
             
             return jsonify(response_data), 200
@@ -735,7 +735,7 @@ def cleanup_files():
                 file_path = os.path.join(app.config['PROCESSED_FOLDER'], stored_filename)
             elif file_type in ['macro', 'instructions']:
                 file_path = os.path.join(app.config['MACROS_FOLDER'], stored_filename)
-            elif file_type == 'report':
+            elif file_type in ['report', 'macro_report']:
                 file_path = os.path.join(app.config['REPORTS_FOLDER'], stored_filename)
             else:
                 file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
@@ -1603,7 +1603,7 @@ def get_generated_files(file_id):
             '''SELECT id, original_filename, file_type, file_size, upload_date 
                FROM files 
                WHERE parent_file_id = ? AND user_id = ?
-               AND file_type IN ('macro', 'instructions', 'report', 'processed')
+               AND file_type IN ('macro', 'instructions', 'report', 'macro_report', 'processed')
                ORDER BY upload_date DESC''',
             (file_id, user['id'])
         ).fetchall()
@@ -1613,13 +1613,14 @@ def get_generated_files(file_id):
         generated_by_name = conn.execute(
             '''SELECT id, original_filename, file_type, file_size, upload_date 
                FROM files 
-               WHERE user_id = ? 
-               AND file_type IN ('macro', 'instructions', 'report', 'processed')
-               AND (original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ?)
+               WHERE user_id = ?
+               AND file_type IN ('macro', 'instructions', 'report', 'macro_report', 'processed')
+               AND (original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ?)
                AND (parent_file_id IS NULL OR parent_file_id != ?)
                ORDER BY upload_date DESC''',
-            (user['id'], f'Macro_{original_filename}%', f'Instructions_{original_filename}%', 
-             f'DeletionReport_{original_filename}%', f'processed_{original_filename}%', file_id)
+            (user['id'], f'Macro_{original_filename}%', f'Instructions_{original_filename}%',
+             f'DeletionReport_{original_filename}%', f'MacroDeletionReport_{original_filename}%',
+             f'processed_{original_filename}%', file_id)
         ).fetchall()
         
         conn.close()
@@ -1637,7 +1638,7 @@ def get_generated_files(file_id):
         # Organize by type
         macros = [f for f in unique_files if f['file_type'] == 'macro']
         instructions = [f for f in unique_files if f['file_type'] == 'instructions']
-        reports = [f for f in unique_files if f['file_type'] == 'report']
+        reports = [f for f in unique_files if f['file_type'] in ['report', 'macro_report']]
         processed = [f for f in unique_files if f['file_type'] == 'processed']
         
         return jsonify({

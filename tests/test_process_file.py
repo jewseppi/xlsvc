@@ -408,7 +408,7 @@ class TestProcessFileEndpoint:
             (data['report_file_id'],)
         ).fetchone()
         assert report_record is not None
-        assert report_record['file_type'] == 'report'
+        assert report_record['file_type'] == 'macro_report'
 
         # Verify file exists on disk
         report_path = os.path.join(test_directories['reports'], report_record['stored_filename'])
@@ -813,8 +813,8 @@ class TestDeletionReportGeneration:
             "SELECT * FROM files WHERE id = ?", (data['report_file_id'],)
         ).fetchone()
         assert report_record is not None
-        assert report_record['file_type'] == 'report'
-        assert 'DeletionReport' in report_record['original_filename']
+        assert report_record['file_type'] == 'macro_report'
+        assert 'MacroDeletionReport' in report_record['original_filename']
 
         # Verify the report file exists on disk
         report_path = os.path.join(test_directories['reports'], report_record['stored_filename'])
