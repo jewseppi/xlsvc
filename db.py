@@ -166,6 +166,21 @@ def init_db():
     ''')
     print("✅ Created filter_profiles table")
 
+    # Chunked upload sessions (temporary; one row per in-progress chunked upload)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS upload_sessions (
+            upload_id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            filename TEXT NOT NULL,
+            total_size INTEGER NOT NULL,
+            total_chunks INTEGER NOT NULL,
+            received_bytes INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+    print("✅ Created upload_sessions table")
+
     # Seed default "Silver" system template if no system templates exist
     existing_templates = cursor.execute(
         'SELECT id FROM filter_profiles WHERE is_system_template = 1'
