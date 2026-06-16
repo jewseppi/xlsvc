@@ -6,3 +6,4 @@ omit =
     process_uno.py
     cleanup_files.py
     github_app.py
+    tools/*
