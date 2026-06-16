@@ -723,7 +723,10 @@ def process_file(file_id):
             if deleted_rows_data:
                 report_stored_filename = f"deletion_report_{uuid.uuid4().hex[:8]}.xlsx"
                 report_path = os.path.join(app.config['REPORTS_FOLDER'], report_stored_filename)
-                report_result = generate_deletion_report(deleted_rows_data, report_path)
+                report_result = generate_deletion_report(
+                    deleted_rows_data, report_path,
+                    columns_removed=columns_to_remove, sheets_removed=sheets_to_remove
+                )
                 if report_result:
                     report_file_id = conn.execute(
                         '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id)

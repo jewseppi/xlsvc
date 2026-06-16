@@ -110,7 +110,10 @@ def main():
         
         # Generate deletion report
         print("Generating deletion report...")
-        report_path = generate_deletion_report(deleted_data, "deletion_report.xlsx")
+        report_path = generate_deletion_report(
+            deleted_data, "deletion_report.xlsx",
+            columns_removed=columns_to_remove, sheets_removed=sheets_to_remove
+        )
         if report_path:
             print(f"Deletion report created: {report_path}")
         else:

@@ -6,24 +6,47 @@ Shows which rows were deleted during processing.
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
-def generate_deletion_report(deleted_rows_data, output_path):
+def generate_deletion_report(deleted_rows_data, output_path, columns_removed=None, sheets_removed=None):
     """
-    Generate an Excel workbook showing deleted rows.
-    
+    Generate an Excel workbook showing what was removed during processing:
+    deleted rows (one sheet each) plus a Summary of removed columns/sheets.
+
     Args:
         deleted_rows_data: Dict of {sheet_name: [{'row_number': int, 'data': [cell values]}]}
         output_path: Where to save the report file
-    
+        columns_removed: optional list of column letters removed entirely
+        sheets_removed: optional list of sheet names/indices removed entirely
+
     Returns:
-        output_path if successful, None if no data
+        output_path if successful, None if there was nothing to report
     """
-    if not deleted_rows_data or len(deleted_rows_data) == 0:
-        print("No deleted rows data to generate report")
+    columns_removed = columns_removed or []
+    sheets_removed = sheets_removed or []
+    deleted_rows_data = deleted_rows_data or {}
+    has_rows = any(rows for rows in deleted_rows_data.values())
+
+    if not has_rows and not columns_removed and not sheets_removed:
+        print("No deletion data to generate report")
         return None
-    
+
     wb = Workbook()
     wb.remove(wb.active)  # Remove default sheet
-    
+
+    # Summary sheet listing entire columns / sheets removed (if any).
+    if columns_removed or sheets_removed:
+        summary = wb.create_sheet(title="Summary")
+        summary.append(["What was removed"])
+        summary["A1"].font = Font(bold=True, size=12)
+        summary.append([])
+        summary.append(["Columns removed (entire column):",
+                        ", ".join(columns_removed) if columns_removed else "None"])
+        summary.append(["Sheets removed (entire tab):",
+                        ", ".join(str(s) for s in sheets_removed) if sheets_removed else "None"])
+        summary.cell(row=3, column=1).font = Font(bold=True)
+        summary.cell(row=4, column=1).font = Font(bold=True)
+        summary.column_dimensions["A"].width = 34
+        summary.column_dimensions["B"].width = 60
+
     sheets_added = 0
     for sheet_name, rows in deleted_rows_data.items():
         if not rows or len(rows) == 0:
@@ -61,14 +84,11 @@ def generate_deletion_report(deleted_rows_data, output_path):
             adjusted_width = min(max(max_length + 2, 10), 50)
             ws.column_dimensions[column_letter].width = adjusted_width
     
-    if sheets_added == 0:
-        print("No sheets added to report")
-        return None
-    
+    total_sheets = len(wb.sheetnames)
     wb.save(output_path)
     wb.close()
-    
-    print(f"Deletion report saved to {output_path} with {sheets_added} sheet(s)")
+
+    print(f"Deletion report saved to {output_path} with {total_sheets} sheet(s)")
     return output_path
 
 def capture_row_data(sheet, row_num, max_cols=50):
