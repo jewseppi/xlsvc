@@ -142,9 +142,15 @@ def delete_empty_rows_direct(doc, filter_rules):
     Delete rows based on filter rules and capture data for report.
     Returns: (deleted_count, deleted_data_dict)
     """
-    doc.calculateAll()
+    # calculateAll refreshes formula results, but some LibreOffice/UNO versions
+    # on the runner don't expose it as a direct attribute (AttributeError).
+    # Guard it: cell values are read directly below regardless.
+    try:
+        doc.calculateAll()
+    except Exception as e:
+        print(f"calculateAll skipped: {e}")
     time.sleep(2)
-    
+
     deleted_count = 0
     deleted_data = {}  # {sheet_name: [row_data]}
     
@@ -157,7 +163,15 @@ def delete_empty_rows_direct(doc, filter_rules):
             sheet_name = sheet.getName()
             print(f"Processing sheet: {sheet_name}")
             
-            last_row = 1000
+            # Use the sheet's actual used range instead of a hard-coded cap, so
+            # large sheets (well beyond 1000 rows) are fully processed.
+            try:
+                cursor = sheet.createCursor()
+                cursor.gotoEndOfUsedArea(False)
+                last_row = cursor.RangeAddress.EndRow + 1
+            except Exception as e:
+                print(f"Could not determine used area ({e}); falling back to 1048576")
+                last_row = 1048576
             print(f"Checking up to row {last_row} in {sheet_name}")
             
             rows_to_delete = []

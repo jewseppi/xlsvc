@@ -34,11 +34,15 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['PROCESSED_FOLDER'] = 'processed'
 app.config['MACROS_FOLDER'] = 'macros'
 app.config['REPORTS_FOLDER'] = 'reports'
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max per-request size (chunks stay well under this)
+# Per-request cap. Uploads are chunked (each chunk well under this), but the
+# automated processing-callback returns the whole processed file in one POST,
+# so this must exceed the largest expected (processed) file.
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB
 
-# Chunked-upload limits. Chunks are small (under MAX_CONTENT_LENGTH); the total
-# assembled-file ceiling is enforced logically at init/chunk/complete.
-MAX_UPLOAD_SIZE = 256 * 1024 * 1024  # 256MB max assembled file
+# Chunked-upload limits. Chunks are small; the total assembled-file ceiling is
+# enforced logically at init/chunk/complete. Files clear out after 24h, so a
+# generous ceiling well above real file sizes is fine.
+MAX_UPLOAD_SIZE = 1024 * 1024 * 1024  # 1GB max assembled file
 CHUNK_SIZE = 8 * 1024 * 1024  # advisory chunk size returned to clients (8MB)
 # Files larger than this (or any legacy .xls) cannot be analyzed in-process by
 # openpyxl on shared hosting; they must use the automated (GitHub Actions) path.
