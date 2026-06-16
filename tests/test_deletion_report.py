@@ -100,6 +100,47 @@ class TestGenerateDeletionReport:
             if os.path.exists(path):
                 os.remove(path)
 
+    def test_summary_lists_removed_columns_and_sheets(self):
+        """Report includes a Summary sheet listing removed columns and sheets."""
+        data = {"S1": [{"row_number": 2, "data": ["x"]}]}
+        fd, path = tempfile.mkstemp(suffix=".xlsx")
+        os.close(fd)
+        try:
+            result = generate_deletion_report(
+                data, path, columns_removed=["B", "D"], sheets_removed=["Old", "3"]
+            )
+            assert result == path
+            wb = load_workbook(path)
+            assert "Summary" in wb.sheetnames
+            text = "\n".join(
+                str(c.value) for row in wb["Summary"].iter_rows() for c in row if c.value
+            )
+            assert "B, D" in text
+            assert "Old, 3" in text
+            assert "S1" in wb.sheetnames  # row sheet still present
+            wb.close()
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_columns_removed_only_still_reports(self):
+        """A report is produced even with no deleted rows, if columns/sheets were removed."""
+        fd, path = tempfile.mkstemp(suffix=".xlsx")
+        os.close(fd)
+        try:
+            result = generate_deletion_report({}, path, columns_removed=["A"])
+            assert result == path
+            wb = load_workbook(path)
+            assert wb.sheetnames == ["Summary"]
+            wb.close()
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_no_rows_no_removals_returns_none(self):
+        """No rows and no column/sheet removals -> no report."""
+        assert generate_deletion_report({}, "/tmp/none.xlsx", columns_removed=[], sheets_removed=[]) is None
+
 
 class TestCaptureRowData:
     """Tests for capture_row_data."""
