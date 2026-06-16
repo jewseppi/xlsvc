@@ -567,7 +567,9 @@ def process_file(file_id):
             if not _validate_columns_to_remove(columns_to_remove):
                 conn.close()
                 return jsonify({'error': 'columns_to_remove must be an array of uppercase column letters'}), 400
-        
+
+        sheets_to_remove = _normalize_sheets_to_remove(data.get('sheets_to_remove'))
+
         print(f"DEBUG: Manual processing with {len(filter_rules)} filter rules")
         
         # Get file info and verify ownership
@@ -673,7 +675,8 @@ def process_file(file_id):
                 file_dict['original_filename'],
                 rows_to_delete_by_sheet,
                 filter_rules,
-                columns_to_remove=columns_to_remove
+                columns_to_remove=columns_to_remove,
+                sheets_to_remove=sheets_to_remove
             )
             
             macro_filename = f"macro_{uuid.uuid4().hex[:8]}.bas"
@@ -687,7 +690,8 @@ def process_file(file_id):
                 total_rows_to_delete,
                 list(rows_to_delete_by_sheet.keys()),
                 filter_rules,
-                columns_to_remove=columns_to_remove
+                columns_to_remove=columns_to_remove,
+                sheets_to_remove=sheets_to_remove
             )
             
             instructions_filename = f"instructions_{uuid.uuid4().hex[:8]}.txt"
@@ -1244,7 +1248,9 @@ def process_file_automated(file_id):
         if err:
             conn.close()
             return err
-        
+
+        sheets_to_remove = _normalize_sheets_to_remove(data.get('sheets_to_remove'))
+
         # Validate filter rules
         if not filter_rules or not isinstance(filter_rules, list) or len(filter_rules) == 0:
             conn.close()
@@ -1324,7 +1330,8 @@ def process_file_automated(file_id):
                 "callback_token": callback_token,
                 "job_id": job_id,
                 "filter_rules": json.dumps(filter_rules),
-                "columns_to_remove": json.dumps(columns_to_remove) if columns_to_remove else "[]"
+                "columns_to_remove": json.dumps(columns_to_remove) if columns_to_remove else "[]",
+                "sheets_to_remove": json.dumps(sheets_to_remove) if sheets_to_remove else "[]"
             }
         }
         
@@ -2329,6 +2336,29 @@ def _validate_columns_to_remove(columns):
         if not isinstance(col, str) or not re.match(r'^[A-Z]{1,3}$', col):
             return False
     return True
+
+
+def _normalize_sheets_to_remove(value):
+    """Normalize sheets_to_remove to a de-duplicated list of trimmed strings.
+
+    Entries are sheet names or 1-based indices. Non-list input yields [].
+    De-duplication is case-insensitive; the first casing seen is kept.
+    """
+    if not isinstance(value, list):
+        return []
+    result = []
+    seen = set()
+    for entry in value:
+        if not isinstance(entry, str):
+            continue
+        token = entry.strip()
+        if not token:
+            continue
+        key = token.lower()
+        if key not in seen:
+            seen.add(key)
+            result.append(token)
+    return result
 
 
 @app.route('/api/filter-profiles', methods=['GET'])

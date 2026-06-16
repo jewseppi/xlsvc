@@ -531,6 +531,34 @@ class TestGenerateLibreOfficeMacro:
         )
         assert 'Columns.removeByIndex' not in macro
 
+    def test_generate_macro_with_sheets_to_remove(self):
+        """Macro removes sheets by 1-based index (descending) and by name (case-insensitive)."""
+        macro = generate_libreoffice_macro(
+            'test.xlsx',
+            {'Sheet1': [2]},
+            [],
+            sheets_to_remove=['2', 'Summary'],
+        )
+        # 1-based index 2 -> 0-based removeByIndex(1, 1)
+        assert 'oRemSheets.removeByIndex(1, 1)' in macro
+        # name-based, case-insensitive scan
+        assert 'UCase("Summary")' in macro
+        assert 'oRemSheets.getByIndex(remIdx).getName()' in macro
+
+    def test_generate_macro_without_sheets_to_remove(self):
+        """No sheet-removal code when sheets_to_remove is omitted/empty."""
+        macro = generate_libreoffice_macro('test.xlsx', {'Sheet1': [2]}, [], sheets_to_remove=[])
+        assert 'oRemSheets' not in macro
+
+    def test_generate_instructions_with_sheets_to_remove(self):
+        """Instructions list sheets to be removed."""
+        text = generate_instructions(
+            'test.xlsx', 1, ['Sheet1'], [{'column': 'F', 'value': '0'}],
+            sheets_to_remove=['Summary', '3'],
+        )
+        assert 'Sheets/tabs to be removed' in text
+        assert 'Summary' in text and '3' in text
+
 
 class TestGenerateInstructions:
     """Tests for generate_instructions function"""

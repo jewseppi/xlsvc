@@ -913,3 +913,18 @@ class TestCleanupFileDeleteException:
         monkeypatch.setattr(cleanup_mod.os, 'remove', failing_remove)
         # Should not raise
         main.cleanup_old_files()
+
+
+class TestNormalizeSheetsToRemove:
+    """Test _normalize_sheets_to_remove."""
+
+    def test_non_list_returns_empty(self):
+        assert main._normalize_sheets_to_remove(None) == []
+        assert main._normalize_sheets_to_remove("Sheet1") == []
+        assert main._normalize_sheets_to_remove(5) == []
+
+    def test_trims_drops_empties_and_non_strings(self):
+        assert main._normalize_sheets_to_remove(["  Summary ", "", "  ", 3, "2"]) == ["Summary", "2"]
+
+    def test_dedupes_case_insensitively_keeping_first(self):
+        assert main._normalize_sheets_to_remove(["Sheet1", "sheet1", "DATA"]) == ["Sheet1", "DATA"]
