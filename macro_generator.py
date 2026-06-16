@@ -1,7 +1,7 @@
 from datetime import datetime
 
 
-def generate_libreoffice_macro(original_filename, rows_to_delete_by_sheet, filter_rules=None, columns_to_remove=None):
+def generate_libreoffice_macro(original_filename, rows_to_delete_by_sheet, filter_rules=None, columns_to_remove=None, sheets_to_remove=None):
     """Generate a LibreOffice Calc macro that deletes rows"""
     
     macro_header = f'''REM Macro generated to clean up: {original_filename}
@@ -104,6 +104,27 @@ Sub DeleteEmptyRows()
             macro_col_removal += '''    End If
 '''
 
+    # Build sheet/tab removal code (numeric indices removed first, descending;
+    # then names matched case-insensitively by scanning current sheets).
+    macro_sheet_removal = ""
+    if sheets_to_remove:
+        macro_sheet_removal = (
+            "\n    ' Remove entire sheets/tabs\n"
+            "    Dim oRemSheets As Object, remIdx As Integer\n"
+            "    oRemSheets = oDoc.Sheets\n"
+        )
+        numeric = sorted({int(s.strip()) for s in sheets_to_remove if s.strip().isdigit()}, reverse=True)
+        names = [s.strip() for s in sheets_to_remove if not s.strip().isdigit()]
+        for idx1 in numeric:
+            macro_sheet_removal += f"    If oRemSheets.getCount() >= {idx1} Then oRemSheets.removeByIndex({idx1 - 1}, 1)  ' Sheet #{idx1}\n"
+        for name in names:
+            esc = name.replace('"', '""')
+            macro_sheet_removal += (
+                "    For remIdx = oRemSheets.getCount() - 1 To 0 Step -1\n"
+                f'        If UCase(oRemSheets.getByIndex(remIdx).getName()) = UCase("{esc}") Then oRemSheets.removeByIndex(remIdx, 1)\n'
+                "    Next remIdx\n"
+            )
+
     macro_footer = '''
     _SafeSetEnable oController, True
     _SaveAndQuit oDoc
@@ -122,10 +143,10 @@ EH:
 End Sub
 '''
 
-    return macro_header + macro_body + macro_col_removal + macro_footer
+    return macro_header + macro_body + macro_col_removal + macro_sheet_removal + macro_footer
 
 
-def generate_instructions(original_filename, total_rows, sheet_names, filter_rules, columns_to_remove=None):
+def generate_instructions(original_filename, total_rows, sheet_names, filter_rules, columns_to_remove=None, sheets_to_remove=None):
     """Generate step-by-step instructions for using the macro"""
     
     # Build filter description -- all rules are empty/zero checks (parity with UNO)
@@ -144,6 +165,13 @@ def generate_instructions(original_filename, total_rows, sheet_names, filter_rul
             col_removal_desc += f"  {bullet} Column {col}\n"
         col_removal_desc += "Note: Columns are removed after row deletion, right-to-left.\n"
 
+    # Build sheet/tab removal description
+    sheet_removal_desc = ""
+    if sheets_to_remove:
+        sheet_removal_desc = "\nSheets/tabs to be removed entirely (by name or position):\n"
+        for s in sheets_to_remove:
+            sheet_removal_desc += f"  {bullet} {s}\n"
+
     sheet_list = nl.join(bullet + " " + sheet for sheet in sheet_names)
     sheet_breakdown = nl.join(
         bullet + " " + sheet + ": rows to review and potentially delete"
@@ -161,7 +189,7 @@ Generated on: {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC
 Analysis found {total_rows} rows to be deleted across {len(sheet_names)} sheet(s):
 {sheet_list}
 
-{filter_desc}{col_removal_desc}
+{filter_desc}{col_removal_desc}{sheet_removal_desc}
 
 === METHOD 1: LIBREOFFICE CALC MACRO (RECOMMENDED) ===
 

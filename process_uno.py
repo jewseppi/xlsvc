@@ -63,6 +63,36 @@ def main():
                         print(f"Error removing column {col_letter} from {sheet.getName()}: {e}")
             print(f"Column removal complete")
 
+        # Remove entire sheets/tabs if specified (by name, case-insensitive, or 1-based index)
+        sheets_to_remove = get_sheets_to_remove()
+        if sheets_to_remove:
+            print(f"Removing sheets: {sheets_to_remove}")
+            sheets = doc.getSheets()
+            count = sheets.getCount()
+            names_now = [sheets.getByIndex(i).getName() for i in range(count)]
+            # Resolve each entry to a concrete sheet name against the ORIGINAL
+            # positions first, so index-based entries aren't thrown off as
+            # earlier sheets get removed.
+            targets = []
+            for entry in sheets_to_remove:
+                e = entry.strip()
+                if e.isdigit():
+                    idx = int(e) - 1  # 1-based -> 0-based
+                    if 0 <= idx < count:
+                        targets.append(names_now[idx])
+                else:
+                    for nm in names_now:
+                        if nm.strip().lower() == e.lower():
+                            targets.append(nm)
+                            break
+            for target in dict.fromkeys(targets):  # de-dup, preserve order
+                try:
+                    if sheets.hasByName(target):
+                        sheets.removeByName(target)
+                except Exception as e:
+                    print(f"Error removing sheet {target}: {e}")
+            print("Sheet removal complete")
+
         # Save processed file
         output_path = os.path.abspath("output.xlsx")
         output_url = uno.systemPathToFileUrl(output_path)
@@ -103,6 +133,17 @@ def get_columns_to_remove():
         if not isinstance(columns, list):
             return []
         return [str(c).strip().upper() for c in columns if str(c).strip()]
+    except json.JSONDecodeError:
+        return []
+
+def get_sheets_to_remove():
+    """Get sheets to remove (names or 1-based indices) from environment variable"""
+    sheets_json = os.getenv('SHEETS_TO_REMOVE', '[]')
+    try:
+        sheets = json.loads(sheets_json)
+        if not isinstance(sheets, list):
+            return []
+        return [str(s).strip() for s in sheets if str(s).strip()]
     except json.JSONDecodeError:
         return []
 
