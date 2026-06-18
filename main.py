@@ -5,7 +5,7 @@ from flask_jwt_extended import JWTManager, jwt_required, create_access_token, ge
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from db import get_db, init_db
-from processing_helpers import evaluate_cell_value, is_empty_or_zero, column_to_index
+from processing_helpers import evaluate_cell_value, is_empty_or_zero, column_to_index, load_workbook_resilient
 from file_utils import calculate_file_hash, ensure_directories, get_file_path, allowed_file, validate_excel_file
 from auth_helpers import request_counts, rate_limit, generate_download_token, verify_download_token, validate_password_strength, is_admin_user, validate_invitation_token
 from cleanup import cleanup_old_files
@@ -611,7 +611,7 @@ def process_file(file_id):
         total_rows_to_delete = 0
         
         try:
-            wb_calc = load_workbook(input_path, data_only=True)
+            wb_calc = load_workbook_resilient(input_path, data_only=True)
             
             for sheet_name in wb_calc.sheetnames:
                 sheet = wb_calc[sheet_name]
@@ -667,7 +667,11 @@ def process_file(file_id):
             
             wb_calc.close()
             
-            if total_rows_to_delete == 0:
+            # Only short-circuit when there is genuinely nothing to do. If the
+            # user asked to remove columns or sheets, we still generate a macro
+            # and report even with zero row deletions — parity with the
+            # automated/UNO path, which performs those removals regardless.
+            if total_rows_to_delete == 0 and not columns_to_remove and not sheets_to_remove:
                 return jsonify({
                     'message': 'No rows found for deletion',
                     'total_rows_to_delete': 0,
@@ -718,9 +722,11 @@ def process_file(file_id):
                  instructions_filename, os.path.getsize(instructions_path), True, 'instructions')
             ).lastrowid
 
-            # Generate deletion report (parity with UNO automated path)
+            # Generate deletion report (parity with UNO automated path). Produce
+            # it whenever rows, columns, or sheets were removed so the report's
+            # Summary still records column/sheet removals with zero row deletions.
             report_file_id = None
-            if deleted_rows_data:
+            if deleted_rows_data or columns_to_remove or sheets_to_remove:
                 report_stored_filename = f"deletion_report_{uuid.uuid4().hex[:8]}.xlsx"
                 report_path = os.path.join(app.config['REPORTS_FOLDER'], report_stored_filename)
                 report_result = generate_deletion_report(

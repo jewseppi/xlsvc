@@ -79,7 +79,11 @@ Sub DeleteEmptyRows()
         macro_body += '''    End If
 '''
 
-    # Build column removal code (right-to-left to preserve indices)
+    # Build column removal code (right-to-left to preserve indices). Columns are
+    # removed from EVERY sheet at run time — parity with the automated/UNO path,
+    # which removes columns from all sheets, not only those that had row
+    # deletions. (The previous per-deletion-sheet form skipped sheets with no
+    # rows to delete, diverging from the automated output.)
     macro_col_removal = ""
     if columns_to_remove:
         # Convert column letters to 0-based indices, sort descending
@@ -92,17 +96,18 @@ Sub DeleteEmptyRows()
             col_indices.append((idx - 1, col_letter))
         col_indices.sort(key=lambda x: x[0], reverse=True)
 
-        for sheet_name in rows_to_delete_by_sheet:
-            macro_col_removal += f'''
-    ' Remove columns from sheet: {sheet_name}
-    If oDoc.Sheets.hasByName("{sheet_name}") Then
-        oSheet = oDoc.Sheets.getByName("{sheet_name}")
-'''
-            for col_idx, col_letter in col_indices:
-                macro_col_removal += f'''        oSheet.Columns.removeByIndex({col_idx}, 1)  ' Column {col_letter}
-'''
-            macro_col_removal += '''    End If
-'''
+        macro_col_removal += (
+            "\n    ' Remove columns from ALL sheets (parity with automated path)\n"
+            "    Dim oColSheets As Object, colSheetIdx As Integer\n"
+            "    oColSheets = oDoc.Sheets\n"
+            "    For colSheetIdx = 0 To oColSheets.getCount() - 1\n"
+            "        oSheet = oColSheets.getByIndex(colSheetIdx)\n"
+        )
+        for col_idx, col_letter in col_indices:
+            macro_col_removal += (
+                f"        oSheet.Columns.removeByIndex({col_idx}, 1)  ' Column {col_letter}\n"
+            )
+        macro_col_removal += "    Next colSheetIdx\n"
 
     # Build sheet/tab removal code (numeric indices removed first, descending;
     # then names matched case-insensitively by scanning current sheets).

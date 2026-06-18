@@ -186,7 +186,47 @@ class TestProcessFileEndpoint:
         data = response.get_json()
         assert data['total_rows_to_delete'] == 0
         assert 'No rows found for deletion' in data['message']
-    
+
+    def test_process_file_columns_only_no_rows_still_generates(self, client, auth_token, sample_excel_file, test_directories, db_connection):
+        """With no matching rows but columns_to_remove set, a macro + report are
+        still generated (parity with the automated path, which removes columns
+        regardless of row deletions)."""
+        if auth_token is None:
+            r = client.post('/api/process/1', json={'filter_rules': [{'column': 'A', 'value': '0'}]})
+            assert r.status_code == 401
+            return
+
+        with open(sample_excel_file, 'rb') as f:
+            up = client.post(
+                '/api/upload',
+                data={'file': (f, 'cols_only.xlsx')},
+                headers={'Authorization': f'Bearer {auth_token}'},
+                content_type='multipart/form-data'
+            )
+        assert up.status_code in [200, 201], f"Upload failed: {up.get_json()}"
+        file_id = up.get_json()['file_id']
+
+        # Filter on Column A (non-empty in every row) -> zero row matches,
+        # but request removal of Column B.
+        resp = client.post(
+            f'/api/process/{file_id}',
+            json={'filter_rules': [{'column': 'A', 'value': '0'}], 'columns_to_remove': ['B']},
+            headers={'Authorization': f'Bearer {auth_token}'}
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data['total_rows_to_delete'] == 0
+        assert data['message'] == 'Analysis complete'
+        assert 'macro' in data['downloads']
+        assert 'report' in data['downloads']  # Summary report for the column removal
+
+        # The generated macro removes column B from all sheets
+        macro_id = data['downloads']['macro']['file_id']
+        rec = db_connection.execute('SELECT stored_filename FROM files WHERE id = ?', (macro_id,)).fetchone()
+        with open(os.path.join(test_directories['macros'], rec['stored_filename'])) as fh:
+            content = fh.read()
+        assert 'oSheet.Columns.removeByIndex(1, 1)' in content
+
     def test_process_file_generates_macro_and_instructions(self, client, auth_token, comprehensive_test_excel, test_directories, db_connection):
         """Test that process_file generates macro and instructions files"""
         if auth_token is None:
@@ -269,7 +309,7 @@ class TestProcessFileEndpoint:
             )
         assert up.status_code in [200, 201]
         file_id = up.get_json()["file_id"]
-        with patch("main.load_workbook") as mock_load:
+        with patch("main.load_workbook_resilient") as mock_load:
             mock_load.side_effect = RuntimeError("Simulated analysis error")
             r = client.post(
                 f"/api/process/{file_id}",
@@ -530,6 +570,31 @@ class TestGenerateLibreOfficeMacro:
             columns_to_remove=[]
         )
         assert 'Columns.removeByIndex' not in macro
+
+    def test_generate_macro_columns_removed_from_all_sheets(self):
+        """Column removal loops every sheet at runtime (parity with the automated
+        path), not only sheets that had row deletions."""
+        macro = generate_libreoffice_macro(
+            'test.xlsx',
+            {'Sheet1': [2]},  # only Sheet1 has deletions
+            [],
+            columns_to_remove=['B'],
+        )
+        # Runtime loop over all sheets rather than per-deletion-sheet blocks
+        assert 'For colSheetIdx = 0 To oColSheets.getCount() - 1' in macro
+        assert 'oColSheets.getByIndex(colSheetIdx)' in macro
+        assert 'oSheet.Columns.removeByIndex(1, 1)' in macro  # column B
+
+    def test_generate_macro_columns_only_no_row_deletions(self):
+        """Column removal is still generated when there are no rows to delete."""
+        macro = generate_libreoffice_macro(
+            'test.xlsx',
+            {},  # no row deletions at all
+            [],
+            columns_to_remove=['A', 'C'],
+        )
+        assert 'For colSheetIdx = 0 To oColSheets.getCount() - 1' in macro
+        assert macro.count('oSheet.Columns.removeByIndex') == 2
 
     def test_generate_macro_with_sheets_to_remove(self):
         """Macro removes sheets by 1-based index (descending) and by name (case-insensitive)."""

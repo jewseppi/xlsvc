@@ -89,3 +89,79 @@ class TestColumnToIndex:
         """Test edge cases"""
         assert column_to_index('IV') == 256  # Excel max column in older versions
         assert column_to_index('XFD') == 16384  # Excel max column in newer versions
+
+
+class TestLoadWorkbookResilient:
+    """Tests for load_workbook_resilient (tolerates LibreOffice's bad cellStyles)."""
+
+    @staticmethod
+    def _normal_xlsx_bytes():
+        import io
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Data"
+        ws["A1"] = "hello"
+        ws["B1"] = 42
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf.read()
+
+    @classmethod
+    def _bad_cellstyles_xlsx(cls):
+        """A workbook whose <cellStyles> references a missing xfId -> IndexError."""
+        import io, re, zipfile
+        src = zipfile.ZipFile(io.BytesIO(cls._normal_xlsx_bytes()))
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+            for item in src.infolist():
+                data = src.read(item.filename)
+                if item.filename == "xl/styles.xml":
+                    s = data.decode("utf-8")
+                    bad = '<cellStyle name="Bad" xfId="999" builtinId="0"/>'
+                    s = re.sub(r'<cellStyles count="\d+">', '<cellStyles count="2">' + bad, s, count=1)
+                    data = s.encode("utf-8")
+                dst.writestr(item, data)
+        out.seek(0)
+        return out.read()
+
+    def test_normal_workbook_loads(self, tmp_path):
+        from processing_helpers import load_workbook_resilient
+        p = tmp_path / "ok.xlsx"
+        p.write_bytes(self._normal_xlsx_bytes())
+        wb = load_workbook_resilient(str(p), data_only=True)
+        assert wb["Data"]["A1"].value == "hello"
+        wb.close()
+
+    def test_bad_cellstyles_recovered(self, tmp_path):
+        import warnings
+        from openpyxl import load_workbook
+        from processing_helpers import load_workbook_resilient
+        p = tmp_path / "bad.xlsx"
+        p.write_bytes(self._bad_cellstyles_xlsx())
+        # The unguarded loader raises on this file...
+        with pytest.raises((IndexError, KeyError)):
+            load_workbook(str(p))
+        # ...but the resilient loader recovers and the data is intact.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            wb = load_workbook_resilient(str(p), data_only=True)
+        assert wb["Data"]["A1"].value == "hello"
+        assert wb["Data"]["B1"].value == 42
+        wb.close()
+
+    def test_reraises_when_no_styles_to_strip(self, tmp_path, monkeypatch):
+        """If loading fails but there's no styles.xml to fix, the error propagates."""
+        import io, zipfile
+        import processing_helpers
+        # A valid zip with no xl/styles.xml entry.
+        p = tmp_path / "nostyles.xlsx"
+        with zipfile.ZipFile(p, "w") as z:
+            z.writestr("dummy.txt", "x")
+        monkeypatch.setattr(
+            processing_helpers, "load_workbook",
+            lambda *a, **k: (_ for _ in ()).throw(IndexError("boom")),
+        )
+        with pytest.raises(IndexError):
+            processing_helpers.load_workbook_resilient(str(p))

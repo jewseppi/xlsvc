@@ -17,11 +17,11 @@ template), and rows with an empty Column A are skipped (parity rule).
 """
 import os
 import sys
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 
 # Allow running as `python tools/parity_check.py` from the repo root.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from processing_helpers import is_empty_or_zero
+from processing_helpers import is_empty_or_zero, load_workbook_resilient
 
 FILTER_COLUMNS = ["F", "G", "H", "I"]
 
@@ -79,8 +79,8 @@ def generate(path="parity_test.xlsx"):
 
 
 def compare(path_a, path_b):
-    wb_a = load_workbook(path_a, data_only=True)
-    wb_b = load_workbook(path_b, data_only=True)
+    wb_a = load_workbook_resilient(path_a, data_only=True)
+    wb_b = load_workbook_resilient(path_b, data_only=True)
     diffs = []
     if wb_a.sheetnames != wb_b.sheetnames:
         diffs.append(f"sheet names differ: {wb_a.sheetnames} vs {wb_b.sheetnames}")
