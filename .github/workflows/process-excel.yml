@@ -101,6 +101,7 @@ jobs:
           name: processed-excel-${{ github.event.client_payload.job_id }}
           path: |
             output.xlsx
+            deletion_report.xlsx
             process_output.log
           retention-days: 30
           if-no-files-found: warn
