@@ -8,6 +8,7 @@ import zipfile
 
 import pytest
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill
 
 from numbers_export import to_numbers_compatible
 
@@ -38,6 +39,12 @@ def _libreoffice_like_source(tmp_path, with_drawing=True, extra_media_ext=None):
     a.title = "Alpha"
     a.append(["SKU", "Qty"])
     a.append(["X-1", 5])
+    # styled cells: a fill + bold East-Asian font + a keep-able and a
+    # bracketed (sanitised) number format
+    a["A2"].fill = PatternFill(start_color="FF00FF00", end_color="FF00FF00", fill_type="solid")
+    a["A2"].font = Font(name="宋体", bold=True, color="FFFF0000")
+    a["A2"].number_format = "0.00"          # simple -> kept
+    a["B2"].number_format = "[RED]0.00"      # bracketed -> General
     b = wb.create_sheet("Beta")
     b.append(["only", "data"])
     buf = io.BytesIO()
@@ -114,6 +121,13 @@ class TestToNumbersCompatible:
         wb = load_workbook(dst)
         assert wb.sheetnames == ["Alpha", "Beta"]
         assert wb["Alpha"]["A2"].value == "X-1"
+        # formatting carried, but sanitised for Numbers
+        cell = wb["Alpha"]["A2"]
+        assert cell.font.name == "Arial"          # exotic font name normalised
+        assert cell.font.bold is True              # weight preserved
+        assert cell.fill.fgColor.rgb == "FF00FF00"  # fill preserved
+        assert cell.number_format == "0.00"        # simple format kept
+        assert wb["Alpha"]["B2"].number_format == "General"  # bracketed -> General
         wb.close()
 
     def test_no_drawings_plain_rebuild(self, tmp_path):

@@ -7,23 +7,29 @@ Numbers refuses the file with "couldn't read the file", even though Excel,
 Google Sheets and LibreOffice all open it. (Numbers opens workbooks written by
 openpyxl without issue.)
 
-This module rebuilds the workbook's data through openpyxl (clean worksheets and
-styles that Numbers accepts) and then grafts LibreOffice's original media and
+This module rebuilds the workbook through openpyxl (clean worksheet and style
+XML that Numbers accepts) and then grafts LibreOffice's original media and
 drawings back in by raw byte copy. Because the images are copied verbatim rather
 than re-encoded, formats Pillow can't handle (wdp / wmf) survive, and the
 drawing anchors still reference the same cells, so the product images land in
 the right place.
 
-The trade-off is cell formatting: fonts, colours and custom number formats are
-not carried over (that's exactly what Numbers rejects). The untouched original
-file remains the full-fidelity copy for Excel / LibreOffice.
+Cell formatting is preserved as far as Numbers allows: fills (background
+colours), borders, alignment and font weight/size/colour are carried over. The
+two things Numbers rejects are sanitised rather than dropped wholesale — the
+font *name* is normalised to Arial (LibreOffice's East Asian font entries are
+the offender, not the bold/size/colour) and bracketed number-format codes such
+as [RED] become General. The untouched original file remains the full-fidelity
+copy for Excel / LibreOffice.
 """
+import copy
 import io
 import re
 import zipfile
 import xml.etree.ElementTree as ET
 
 from openpyxl import Workbook
+from openpyxl.styles import Font
 
 from processing_helpers import load_workbook_resilient
 
@@ -48,16 +54,42 @@ _CONTENT_TYPES = {
 }
 
 
-def _rebuild_values(src_path):
-    """Rebuild a values-only workbook (Numbers-clean) and return its bytes."""
+def _safe_number_format(fmt):
+    """Drop number-format codes Numbers can't parse (colour/conditional codes
+    in brackets, e.g. [RED] or [$-409]); keep simple ones like 0.00 or 0%."""
+    if fmt and "[" not in fmt:
+        return fmt
+    return "General"
+
+
+def _rebuild_clean(src_path):
+    """Rebuild a Numbers-clean workbook (clean worksheet/style XML) carrying
+    cached values plus the safe parts of cell formatting, and return its bytes.
+
+    Carried: fills (background colours), borders, alignment, and fonts
+    (weight/size/colour) with the font *name* normalised to Arial — LibreOffice's
+    original font entries (e.g. East Asian faces with non-Latin charsets) are
+    what Numbers rejects. Number formats are sanitised by _safe_number_format.
+    """
     src = load_workbook_resilient(src_path, data_only=True)
     out = Workbook()
     out.remove(out.active)
     for name in src.sheetnames:
         ws = out.create_sheet(title=name[:31])
         s = src[name]
-        for row in s.iter_rows(values_only=True):
-            ws.append(list(row))
+        for row in s.iter_rows():
+            for c in row:
+                nc = ws.cell(row=c.row, column=c.column, value=c.value)
+                if c.has_style:
+                    f = c.font
+                    nc.font = Font(
+                        name="Arial", size=f.size, bold=f.bold, italic=f.italic,
+                        underline=f.underline, strike=f.strike, color=f.color,
+                    )
+                    nc.fill = copy.copy(c.fill)
+                    nc.border = copy.copy(c.border)
+                    nc.alignment = copy.copy(c.alignment)
+                    nc.number_format = _safe_number_format(c.number_format)
     if not out.sheetnames:  # pragma: no cover - never leave a zero-sheet book
         out.create_sheet(title="Sheet1")
     src.close()
@@ -103,7 +135,7 @@ def to_numbers_compatible(src_path, dst_path):
     Returns ``dst_path`` on success. Raises on failure; callers should treat
     the conversion as best-effort and keep the original file regardless.
     """
-    clean_bytes = _rebuild_values(src_path)
+    clean_bytes = _rebuild_clean(src_path)
 
     with zipfile.ZipFile(src_path) as zlo, \
             zipfile.ZipFile(io.BytesIO(clean_bytes)) as zclean:
