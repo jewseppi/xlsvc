@@ -70,6 +70,7 @@ def _rebuild_clean(src_path):
     (weight/size/colour) with the font *name* normalised to Arial — LibreOffice's
     original font entries (e.g. East Asian faces with non-Latin charsets) are
     what Numbers rejects. Number formats are sanitised by _safe_number_format.
+    Layout (column widths, row heights, merged cells) is carried over too.
     """
     src = load_workbook_resilient(src_path, data_only=True)
     out = Workbook()
@@ -90,6 +91,7 @@ def _rebuild_clean(src_path):
                     nc.border = copy.copy(c.border)
                     nc.alignment = copy.copy(c.alignment)
                     nc.number_format = _safe_number_format(c.number_format)
+        _copy_layout(s, ws)
     if not out.sheetnames:  # pragma: no cover - never leave a zero-sheet book
         out.create_sheet(title="Sheet1")
     src.close()
@@ -97,6 +99,22 @@ def _rebuild_clean(src_path):
     out.save(buf)
     buf.seek(0)
     return buf.read()
+
+
+def _copy_layout(src_ws, dst_ws):
+    """Carry over column widths, row heights and merged cells."""
+    for col, dim in src_ws.column_dimensions.items():
+        if dim.width:
+            d = dst_ws.column_dimensions[col]
+            d.width = dim.width
+            d.hidden = dim.hidden
+    for idx, dim in src_ws.row_dimensions.items():
+        if dim.height:
+            d = dst_ws.row_dimensions[idx]
+            d.height = dim.height
+            d.hidden = dim.hidden
+    for rng in list(src_ws.merged_cells.ranges):
+        dst_ws.merge_cells(str(rng))
 
 
 def _sheet_name_to_drawing(zf):

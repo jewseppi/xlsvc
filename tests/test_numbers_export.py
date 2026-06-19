@@ -45,6 +45,10 @@ def _libreoffice_like_source(tmp_path, with_drawing=True, extra_media_ext=None):
     a["A2"].font = Font(name="宋体", bold=True, color="FFFF0000")
     a["A2"].number_format = "0.00"          # simple -> kept
     a["B2"].number_format = "[RED]0.00"      # bracketed -> General
+    # layout: column width, row height, merged range
+    a.column_dimensions["A"].width = 25
+    a.row_dimensions[1].height = 30
+    a.merge_cells("A4:B4")
     b = wb.create_sheet("Beta")
     b.append(["only", "data"])
     buf = io.BytesIO()
@@ -128,6 +132,10 @@ class TestToNumbersCompatible:
         assert cell.fill.fgColor.rgb == "FF00FF00"  # fill preserved
         assert cell.number_format == "0.00"        # simple format kept
         assert wb["Alpha"]["B2"].number_format == "General"  # bracketed -> General
+        # layout carried over
+        assert wb["Alpha"].column_dimensions["A"].width == 25
+        assert wb["Alpha"].row_dimensions[1].height == 30
+        assert "A4:B4" in [str(r) for r in wb["Alpha"].merged_cells.ranges]
         wb.close()
 
     def test_no_drawings_plain_rebuild(self, tmp_path):
