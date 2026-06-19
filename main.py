@@ -942,7 +942,7 @@ def cleanup_files():
             
             if file_type == 'original':
                 file_path = os.path.join(app.config['UPLOAD_FOLDER'], stored_filename)
-            elif file_type == 'processed':
+            elif file_type in ['processed', 'processed_numbers']:
                 file_path = os.path.join(app.config['PROCESSED_FOLDER'], stored_filename)
             elif file_type in ['macro', 'instructions']:
                 file_path = os.path.join(app.config['MACROS_FOLDER'], stored_filename)
@@ -1418,6 +1418,7 @@ def processing_callback():
         job_id = request.form.get('job_id')
         uploaded_file = request.files.get('file')
         report_file = request.files.get('report')  # ← NEW
+        numbers_file = request.files.get('numbers_file')  # Numbers-compatible copy
         deleted_rows = request.form.get('deleted_rows', 0)
         
         if not job_id or not uploaded_file:
@@ -1478,17 +1479,31 @@ def processing_callback():
             
             # Create file record for report
             report_file_id = conn.execute(
-                '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id) 
+                '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?)''',
                 (job['user_id'], f"DeletionReport_Automated_{original_filename}", report_filename, report_size, True, 'report', job['original_file_id'])
             ).lastrowid
-        
-        # Update job status with report_file_id
+
+        # Save Numbers-compatible copy if provided
+        numbers_file_id = None
+        if numbers_file:
+            numbers_filename = f"numbers_{uuid.uuid4().hex[:8]}.xlsx"
+            numbers_path = os.path.join(app.config['PROCESSED_FOLDER'], numbers_filename)
+            numbers_file.save(numbers_path)
+            numbers_size = os.path.getsize(numbers_path)
+            print(f"Numbers-compatible copy saved: {numbers_path}, size: {numbers_size} bytes")
+            numbers_file_id = conn.execute(
+                '''INSERT INTO files (user_id, original_filename, stored_filename, file_size, processed, file_type, parent_file_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                (job['user_id'], f"Numbers_{original_filename}", numbers_filename, numbers_size, True, 'processed_numbers', job['original_file_id'])
+            ).lastrowid
+
+        # Update job status with report_file_id and numbers_file_id
         conn.execute(
-            '''UPDATE processing_jobs 
-               SET status = ?, result_file_id = ?, deleted_rows = ?, report_file_id = ?
+            '''UPDATE processing_jobs
+               SET status = ?, result_file_id = ?, deleted_rows = ?, report_file_id = ?, numbers_file_id = ?
                WHERE job_id = ?''',
-            ('completed', file_id, deleted_rows, report_file_id, job_id)
+            ('completed', file_id, deleted_rows, report_file_id, numbers_file_id, job_id)
         )
         
         conn.commit()
@@ -1509,7 +1524,8 @@ def processing_callback():
             'status': 'success',
             'file_id': file_id,
             'filename': processed_filename,
-            'report_file_id': report_file_id
+            'report_file_id': report_file_id,
+            'numbers_file_id': numbers_file_id
         }), 200
         
     except Exception as e:
@@ -1700,12 +1716,14 @@ def get_job_status(job_id):
         ).fetchone()
         
         job = conn.execute(
-            '''SELECT pj.*, 
+            '''SELECT pj.*,
                f.original_filename as result_filename,
-               rf.original_filename as report_filename
+               rf.original_filename as report_filename,
+               nf.original_filename as numbers_filename
                FROM processing_jobs pj
                LEFT JOIN files f ON pj.result_file_id = f.id
                LEFT JOIN files rf ON pj.report_file_id = rf.id
+               LEFT JOIN files nf ON pj.numbers_file_id = nf.id
                WHERE pj.job_id = ? AND pj.user_id = ?''',
             (job_id, user['id'])
         ).fetchone()
@@ -1726,6 +1744,9 @@ def get_job_status(job_id):
             if job['report_file_id']:
                 response['report_file_id'] = job['report_file_id']
                 response['report_filename'] = job['report_filename']
+            if job['numbers_file_id']:
+                response['numbers_file_id'] = job['numbers_file_id']
+                response['numbers_filename'] = job['numbers_filename']
         elif job['status'] == 'failed':
             response['error'] = job['error_message']
         
@@ -1814,10 +1835,10 @@ def get_generated_files(file_id):
         
         # Get macros, instructions, reports, and processed files that have parent_file_id set
         generated_with_parent = conn.execute(
-            '''SELECT id, original_filename, file_type, file_size, upload_date 
-               FROM files 
+            '''SELECT id, original_filename, file_type, file_size, upload_date
+               FROM files
                WHERE parent_file_id = ? AND user_id = ?
-               AND file_type IN ('macro', 'instructions', 'report', 'macro_report', 'processed')
+               AND file_type IN ('macro', 'instructions', 'report', 'macro_report', 'processed', 'processed_numbers')
                ORDER BY upload_date DESC''',
             (file_id, user['id'])
         ).fetchall()
@@ -1825,16 +1846,16 @@ def get_generated_files(file_id):
         # Also get files that match the naming pattern (for older files without parent_file_id)
         original_filename = original_file['original_filename']
         generated_by_name = conn.execute(
-            '''SELECT id, original_filename, file_type, file_size, upload_date 
-               FROM files 
+            '''SELECT id, original_filename, file_type, file_size, upload_date
+               FROM files
                WHERE user_id = ?
-               AND file_type IN ('macro', 'instructions', 'report', 'macro_report', 'processed')
-               AND (original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ?)
+               AND file_type IN ('macro', 'instructions', 'report', 'macro_report', 'processed', 'processed_numbers')
+               AND (original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ? OR original_filename LIKE ?)
                AND (parent_file_id IS NULL OR parent_file_id != ?)
                ORDER BY upload_date DESC''',
             (user['id'], f'Macro_{original_filename}%', f'Instructions_{original_filename}%',
              f'DeletionReport_{original_filename}%', f'MacroDeletionReport_{original_filename}%',
-             f'processed_{original_filename}%', file_id)
+             f'processed_{original_filename}%', f'Numbers_{original_filename}%', file_id)
         ).fetchall()
         
         conn.close()
@@ -1854,12 +1875,14 @@ def get_generated_files(file_id):
         instructions = [f for f in unique_files if f['file_type'] == 'instructions']
         reports = [f for f in unique_files if f['file_type'] in ['report', 'macro_report']]
         processed = [f for f in unique_files if f['file_type'] == 'processed']
-        
+        processed_numbers = [f for f in unique_files if f['file_type'] == 'processed_numbers']
+
         return jsonify({
             'macros': macros,
             'instructions': instructions,
             'reports': reports,
-            'processed': processed
+            'processed': processed,
+            'processed_numbers': processed_numbers
         }), 200
         
     except Exception as e:

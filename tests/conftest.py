@@ -123,6 +123,7 @@ def test_app(test_db_path, test_directories, monkeypatch):
             completed_at TIMESTAMP,
             result_file_id INTEGER,
             report_file_id INTEGER,
+            numbers_file_id INTEGER,
             error_message TEXT,
             deleted_rows INTEGER DEFAULT 0,
             filter_rules_json TEXT,
