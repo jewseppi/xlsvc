@@ -52,7 +52,7 @@ def get_file_path(file_type, filename):
     upload, processed, macros, reports = _get_folders()
     if file_type == 'original' or file_type is None:
         return os.path.join(upload, filename)
-    elif file_type == 'processed':
+    elif file_type in ('processed', 'processed_numbers'):
         return os.path.join(processed, filename)
     elif file_type in ['macro', 'instructions']:
         return os.path.join(macros, filename)

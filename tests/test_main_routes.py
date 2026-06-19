@@ -516,6 +516,28 @@ class TestGetMacroAndGeneratedFiles:
         assert "macros" in data
         assert "instructions" in data
 
+    def test_get_generated_files_includes_numbers_copy(self, client, auth_token, test_user, db_connection):
+        """A processed_numbers file is listed under 'processed_numbers'."""
+        if auth_token is None:
+            assert client.get("/api/files/1/generated").status_code == 401
+            return
+        db_connection.execute(
+            "INSERT INTO files (user_id, original_filename, stored_filename, file_type) VALUES (?, 'orig.xlsx', 'stored.xlsx', 'original')",
+            (test_user["id"],),
+        )
+        db_connection.commit()
+        orig_id = db_connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db_connection.execute(
+            "INSERT INTO files (user_id, original_filename, stored_filename, file_type, parent_file_id) VALUES (?, 'Numbers_orig.xlsx', 'numbers.xlsx', 'processed_numbers', ?)",
+            (test_user["id"], orig_id),
+        )
+        db_connection.commit()
+        r = client.get(f"/api/files/{orig_id}/generated", headers={"Authorization": f"Bearer {auth_token}"})
+        assert r.status_code == 200
+        data = r.get_json()
+        assert "processed_numbers" in data
+        assert any(f["file_type"] == "processed_numbers" for f in data["processed_numbers"])
+
     def test_get_macro_macro_not_found_for_file(self, client, auth_token, sample_excel_file):
         """get-macro for file that has no macro yet returns 404."""
         if auth_token is None:
@@ -1022,6 +1044,45 @@ class TestFileHistoryAndJobStatus:
         assert data.get("report_filename") is not None
         db_connection.execute("DELETE FROM processing_jobs WHERE job_id = ?", (job_id,))
         db_connection.execute("DELETE FROM files WHERE id IN (?, ?, ?)", (orig_id, result_id, report_id))
+        db_connection.commit()
+
+    def test_get_job_status_completed_with_numbers_file(self, client, auth_token, test_user, db_connection, test_app, test_directories):
+        """job-status surfaces the Numbers-compatible copy when present."""
+        if auth_token is None:
+            assert client.get("/api/job-status/x").status_code == 401
+            return
+        job_id = "job-numbers-" + uuid.uuid4().hex[:8]
+        db_connection.execute(
+            "INSERT INTO files (user_id, original_filename, stored_filename, file_type) VALUES (?, 'orig.xlsx', 'stored.xlsx', 'original')",
+            (test_user["id"],),
+        )
+        db_connection.commit()
+        orig_id = db_connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db_connection.execute(
+            "INSERT INTO files (user_id, original_filename, stored_filename, file_type, parent_file_id) VALUES (?, 'processed.xlsx', 'proc.xlsx', 'processed', ?)",
+            (test_user["id"], orig_id),
+        )
+        db_connection.commit()
+        result_id = db_connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db_connection.execute(
+            "INSERT INTO files (user_id, original_filename, stored_filename, file_type, parent_file_id) VALUES (?, 'Numbers_orig.xlsx', 'numbers.xlsx', 'processed_numbers', ?)",
+            (test_user["id"], orig_id),
+        )
+        db_connection.commit()
+        numbers_id = db_connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        db_connection.execute(
+            """INSERT INTO processing_jobs (job_id, user_id, original_file_id, status, result_file_id, numbers_file_id, deleted_rows)
+               VALUES (?, ?, ?, 'completed', ?, ?, 5)""",
+            (job_id, test_user["id"], orig_id, result_id, numbers_id),
+        )
+        db_connection.commit()
+        r = client.get(f"/api/job-status/{job_id}", headers={"Authorization": f"Bearer {auth_token}"})
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data.get("numbers_file_id") == numbers_id
+        assert data.get("numbers_filename") == "Numbers_orig.xlsx"
+        db_connection.execute("DELETE FROM processing_jobs WHERE job_id = ?", (job_id,))
+        db_connection.execute("DELETE FROM files WHERE id IN (?, ?, ?)", (orig_id, result_id, numbers_id))
         db_connection.commit()
 
     def test_get_job_status_failed(self, client, auth_token, test_user, db_connection):
@@ -1919,6 +1980,47 @@ class TestCallbackEdgeCases:
         assert r.status_code == 200
         j = r.get_json()
         assert j.get("report_file_id") is not None
+
+    def test_callback_with_numbers_file(self, client, test_user, db_connection, test_app, test_directories):
+        """Callback with a Numbers-compatible copy stores it and links numbers_file_id."""
+        import main
+        main.app.config["PROCESSED_FOLDER"] = test_directories["processed"]
+        stored = str(uuid.uuid4()) + ".xlsx"
+        with open(os.path.join(test_app.config["UPLOAD_FOLDER"], stored), "wb") as f:
+            f.write(b"PK\x03\x04")
+        db_connection.execute(
+            "INSERT INTO files (user_id, original_filename, stored_filename, file_type) VALUES (?, 'orig_num.xlsx', ?, 'original')",
+            (test_user["id"], stored),
+        )
+        db_connection.commit()
+        orig_id = db_connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        job_id = "callback-numbers-" + uuid.uuid4().hex[:8]
+        db_connection.execute(
+            "INSERT INTO processing_jobs (job_id, user_id, original_file_id, status) VALUES (?, ?, ?, 'pending')",
+            (job_id, test_user["id"], orig_id),
+        )
+        db_connection.commit()
+        from io import BytesIO
+        with patch("main.GitHubAppAuth") as MockAuth:
+            MockAuth.return_value = MagicMock()
+            r = client.post(
+                "/api/processing-callback",
+                data={
+                    "job_id": job_id,
+                    "deleted_rows": "3",
+                    "file": (BytesIO(b"PK\x03\x04"), "processed.xlsx"),
+                    "numbers_file": (BytesIO(b"PK\x03\x04"), "output_numbers.xlsx"),
+                },
+                content_type="multipart/form-data",
+                headers={"Authorization": "Bearer callback-secret"},
+            )
+        assert r.status_code == 200
+        numbers_id = r.get_json().get("numbers_file_id")
+        assert numbers_id is not None
+        row = db_connection.execute(
+            "SELECT file_type FROM files WHERE id = ?", (numbers_id,)
+        ).fetchone()
+        assert row["file_type"] == "processed_numbers"
 
     def test_callback_artifact_deletion_failure(self, client, test_user, db_connection, test_app, test_directories):
         """Artifact deletion fails (non-critical) → lines 1200-1201."""

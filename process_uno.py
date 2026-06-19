@@ -105,8 +105,19 @@ def main():
         
         doc.storeToURL(output_url, save_props)
         doc.close(True)
-        
+
         print("LibreOffice save complete.")
+
+        # Produce an Apple Numbers-compatible copy alongside the original.
+        # LibreOffice's XLSX export can't be opened by Numbers; this rebuilds
+        # clean worksheets and grafts the images back. Best effort — the
+        # original output.xlsx remains authoritative if this fails.
+        try:
+            from numbers_export import to_numbers_compatible
+            to_numbers_compatible(output_path, os.path.abspath("output_numbers.xlsx"))
+            print("Numbers-compatible copy created: output_numbers.xlsx")
+        except Exception as e:
+            print(f"Numbers-compatible copy skipped: {e}")
         
         # Generate deletion report
         print("Generating deletion report...")

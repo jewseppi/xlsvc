@@ -68,12 +68,22 @@ jobs:
               echo "⚠️  No deletion report generated"
               REPORT_FLAG=""
             fi
-            
-            # Upload processed file and report (if it exists)
+
+            # Check if a Numbers-compatible copy was produced
+            if [ -f "output_numbers.xlsx" ]; then
+              echo "🍎 Numbers-compatible copy found, size: $(stat -c%s output_numbers.xlsx) bytes"
+              NUMBERS_FLAG="-F numbers_file=@output_numbers.xlsx"
+            else
+              echo "⚠️  No Numbers-compatible copy generated"
+              NUMBERS_FLAG=""
+            fi
+
+            # Upload processed file, report, and Numbers copy (if they exist)
             curl -X POST \
               -F "job_id=${{ github.event.client_payload.job_id }}" \
               -F "file=@output.xlsx" \
               $REPORT_FLAG \
+              $NUMBERS_FLAG \
               -F "deleted_rows=${{ steps.extract_count.outputs.deleted_rows }}" \
               -H "Authorization: Bearer ${{ github.event.client_payload.callback_token }}" \
               "${{ github.event.client_payload.callback_url }}"
@@ -101,6 +111,7 @@ jobs:
           name: processed-excel-${{ github.event.client_payload.job_id }}
           path: |
             output.xlsx
+            output_numbers.xlsx
             deletion_report.xlsx
             process_output.log
           retention-days: 30

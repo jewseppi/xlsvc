@@ -110,6 +110,15 @@ def init_db():
             raise  # pragma: no cover -- unexpected DB error
         print("⚠️  report_file_id column already exists")
 
+    # Add numbers_file_id column to processing_jobs (Numbers-compatible copy)
+    try:
+        cursor.execute('ALTER TABLE processing_jobs ADD COLUMN numbers_file_id INTEGER')
+        print("✅ Added numbers_file_id column to processing_jobs")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise  # pragma: no cover -- unexpected DB error
+        print("⚠️  numbers_file_id column already exists")
+
     # Subscribers table for email signups (used by landing.html form)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS subscribers (
