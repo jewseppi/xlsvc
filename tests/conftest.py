@@ -155,6 +155,19 @@ def test_app(test_db_path, test_directories, monkeypatch):
     ''')
 
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            email TEXT NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            used_at TIMESTAMP DEFAULT NULL,
+            created_by TEXT
+        )
+    ''')
+
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS filter_profiles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,

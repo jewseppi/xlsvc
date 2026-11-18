@@ -158,6 +158,22 @@ def init_db():
     ''')
     print("✅ Created invitation_tokens table")
 
+    # Password reset tokens (admin-generated, single-use, short-lived)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            email TEXT NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            used_at TIMESTAMP DEFAULT NULL,
+            created_by TEXT,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+    print("✅ Created password_reset_tokens table")
+
     # Filter profiles table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS filter_profiles (

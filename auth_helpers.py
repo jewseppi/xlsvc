@@ -166,3 +166,53 @@ def validate_invitation_token(token):
         return False, None, f'Invalid invitation token: {str(e)}'
     except Exception as e:
         return False, None, f'Error validating token: {str(e)}'
+
+
+def validate_reset_token(token):
+    """
+    Validate a password reset token:
+    - Check JWT signature, purpose and expiration
+    - Check it exists in the DB, is unused and unexpired
+    - Check the user still exists
+    Returns (is_valid, email, error_message)
+    """
+    from datetime import datetime
+    generic_error = 'This reset link is invalid or has expired. Ask an admin for a new one.'
+    try:
+        secret = current_app.config['JWT_SECRET_KEY']
+        payload = jwt_lib.decode(token, secret, algorithms=['HS256'], leeway=60)
+
+        if payload.get('purpose') != 'password_reset':
+            return False, None, generic_error
+
+        email = payload.get('email')
+        if not email:
+            return False, None, generic_error
+
+        conn = get_db()
+        try:
+            record = conn.execute(
+                '''SELECT t.email, t.expires_at, t.used_at, u.id AS user_id
+                   FROM password_reset_tokens t
+                   LEFT JOIN users u ON u.id = t.user_id
+                   WHERE t.token = ?''',
+                (token,)
+            ).fetchone()
+
+            if not record or record['user_id'] is None:
+                return False, None, generic_error
+            if record['used_at']:
+                return False, None, 'This reset link has already been used. Ask an admin for a new one.'
+            if datetime.utcnow() > datetime.fromisoformat(record['expires_at']):
+                return False, None, generic_error
+            if record['email'] != email:  # pragma: no cover -- token is unique; defensive only
+                return False, None, generic_error
+
+            return True, email, None
+        finally:
+            conn.close()
+
+    except jwt_lib.InvalidTokenError:  # includes ExpiredSignatureError
+        return False, None, generic_error
+    except Exception as e:
+        return False, None, f'Error validating token: {str(e)}'
