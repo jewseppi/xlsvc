@@ -7,7 +7,7 @@ from werkzeug.utils import secure_filename
 from db import get_db, init_db
 from processing_helpers import evaluate_cell_value, is_empty_or_zero, column_to_index, load_workbook_resilient
 from file_utils import calculate_file_hash, ensure_directories, get_file_path, allowed_file, validate_excel_file
-from auth_helpers import request_counts, rate_limit, generate_download_token, verify_download_token, validate_password_strength, is_admin_user, validate_invitation_token
+from auth_helpers import request_counts, rate_limit, generate_download_token, verify_download_token, validate_password_strength, is_admin_user, validate_invitation_token, validate_reset_token
 from cleanup import cleanup_old_files
 from macro_generator import generate_libreoffice_macro, generate_instructions
 from github_app import GitHubAppAuth
@@ -2251,6 +2251,150 @@ def get_user_details(user_id):
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+PASSWORD_RESET_TTL_HOURS = 24
+
+
+def _frontend_url():
+    frontend_url = os.environ.get('FRONTEND_URL', 'https://xlsvc.jsilverman.ca')
+    if request.host.startswith('localhost'):
+        frontend_url = 'http://localhost:5173'
+    return frontend_url
+
+
+# Admin endpoint to generate a password reset link for a user
+@app.route('/api/admin/users/<int:user_id>/reset-link', methods=['POST'])
+@jwt_required()
+def create_password_reset_link(user_id):
+    """Generate a single-use password reset link for a user (admin only).
+
+    There is no email delivery; the admin copies the link and sends it.
+    Generating a new link invalidates any earlier unused links for that user.
+    """
+    try:
+        current_user_email = get_jwt_identity()
+        if not is_admin_user(current_user_email):
+            return jsonify({'error': 'Admin access required'}), 403
+
+        conn = get_db()
+        try:
+            user = conn.execute(
+                'SELECT id, email FROM users WHERE id = ?', (user_id,)
+            ).fetchone()
+            if not user:
+                return jsonify({'error': 'User not found'}), 404
+
+            now_dt = datetime.utcnow()
+            # Invalidate any outstanding links for this user
+            conn.execute(
+                '''UPDATE password_reset_tokens SET used_at = ?
+                   WHERE user_id = ? AND used_at IS NULL''',
+                (now_dt.isoformat(), user_id)
+            )
+
+            now = int(time.time())
+            ttl_seconds = PASSWORD_RESET_TTL_HOURS * 60 * 60
+            expires_at = now_dt + timedelta(seconds=ttl_seconds)
+            payload = {
+                'email': user['email'],
+                'purpose': 'password_reset',
+                'jti': secrets.token_urlsafe(8),
+                'exp': now + ttl_seconds,
+                'iat': now,
+            }
+            token = jwt_lib.encode(payload, app.config['JWT_SECRET_KEY'], algorithm='HS256')
+
+            conn.execute(
+                '''INSERT INTO password_reset_tokens (user_id, email, token, expires_at, created_by)
+                   VALUES (?, ?, ?, ?, ?)''',
+                (user_id, user['email'], token, expires_at.isoformat(), current_user_email)
+            )
+            conn.commit()
+
+            reset_url = f"{_frontend_url()}/app?reset=1&token={token}"
+            return jsonify({
+                'success': True,
+                'email': user['email'],
+                'reset_url': reset_url,
+                'expires_at': expires_at.isoformat(),
+            }), 201
+        finally:
+            conn.close()
+
+    except Exception as e:
+        print(f"Error creating password reset link: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# Public endpoint: check a reset token and return the email it belongs to
+@app.route('/api/validate-reset-token', methods=['POST'])
+@rate_limit(max_requests=10, window_seconds=300)
+def validate_reset_token_endpoint():
+    try:
+        data = request.get_json(silent=True) or {}
+        token = data.get('token')
+        if not token:
+            return jsonify({'error': 'Token is required'}), 400
+
+        is_valid, email, error_msg = validate_reset_token(token)
+        if not is_valid:
+            return jsonify({'error': error_msg}), 400
+        return jsonify({'valid': True, 'email': email}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# Public endpoint: set a new password using a reset token
+@app.route('/api/reset-password', methods=['POST'])
+@rate_limit(max_requests=5, window_seconds=300)
+def reset_password():
+    try:
+        data = request.get_json(silent=True) or {}
+        token = data.get('token')
+        password = data.get('password')
+        if not token or not password:
+            return jsonify({'error': 'Token and password are required'}), 400
+
+        is_valid, email, error_msg = validate_reset_token(token)
+        if not is_valid:
+            return jsonify({'error': error_msg}), 400
+
+        is_strong, password_error = validate_password_strength(password)
+        if not is_strong:
+            return jsonify({'error': password_error}), 400
+
+        conn = get_db()
+        try:
+            user = conn.execute('SELECT id FROM users WHERE email = ?', (email,)).fetchone()
+            if not user:  # pragma: no cover -- validate_reset_token already checks this
+                return jsonify({'error': 'User not found'}), 404
+
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                'UPDATE users SET password_hash = ? WHERE id = ?',
+                (generate_password_hash(password), user['id'])
+            )
+            # Burn this token and any other outstanding ones for the user
+            conn.execute(
+                '''UPDATE password_reset_tokens SET used_at = ?
+                   WHERE user_id = ? AND used_at IS NULL''',
+                (now, user['id'])
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        access_token = create_access_token(identity=email)
+        return jsonify({
+            'message': 'Password updated successfully',
+            'access_token': access_token,
+            'email': email,
+        }), 200
+
+    except Exception as e:
+        print(f"Error resetting password: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 # Admin endpoint to delete a user
 @app.route('/api/admin/users/<int:user_id>', methods=['DELETE'])
 @jwt_required()
@@ -2326,6 +2470,7 @@ def delete_user(user_id):
             
             # Delete all invitation tokens created by this user
             conn.execute('DELETE FROM invitation_tokens WHERE created_by = ?', (user_to_delete['email'],))
+            conn.execute('DELETE FROM password_reset_tokens WHERE user_id = ?', (user_id,))
             
             # Delete the user
             conn.execute('DELETE FROM users WHERE id = ?', (user_id,))
